@@ -1,0 +1,16 @@
+{
+  "name": "quorum-web",
+  "private": true,
+  "type": "module",
+  "workspaces": ["core", "app"],
+  "scripts": {
+    "build": "npm run build -w @quorum/app",
+    "test": "vitest run",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev": "npm run dev -w @quorum/app"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
