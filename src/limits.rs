@@ -1,5 +1,7 @@
 //! Server-wide caps, WebSocket close codes and room-name validation.
 
+use std::time::Duration;
+
 pub const MAX_CONNS: usize = 1000;
 pub const MAX_CONNS_PER_IP: usize = 8;
 pub const MAX_ROOMS: usize = 200;
@@ -12,6 +14,13 @@ pub const RATE_PER_SEC: f64 = 30.0;
 pub const RATE_BURST: f64 = 60.0;
 pub const MAX_STRIKES: u32 = 100;
 pub const OUTBOX: usize = 512;
+
+/// A socket write that takes longer than this ends the connection.
+pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// The server pings this often.
+pub const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// A connection with no inbound frame (pongs count) for this long is closed.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// WebSocket close codes shared by server and client.
 pub mod close {

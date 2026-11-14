@@ -62,6 +62,13 @@ impl SlotInner {
         }
     }
 
+    fn broadcast_all(&mut self, data: &[u8]) {
+        let ids: Vec<ConnId> = self.peers.keys().copied().collect();
+        for id in ids {
+            self.send(id, data);
+        }
+    }
+
     fn broadcast(&mut self, except: ConnId, data: &[u8]) {
         let ids: Vec<ConnId> = self
             .peers
@@ -212,6 +219,7 @@ impl Peer {
             match reply {
                 Reply::ToSender(b) => inner.send(self.id, &b),
                 Reply::ToOthers(b) => inner.broadcast(self.id, &b),
+                Reply::ToAll(b) => inner.broadcast_all(&b),
             }
         }
         Ok(())

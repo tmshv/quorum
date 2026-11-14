@@ -19,6 +19,7 @@ use yrs::{ClientID, Doc, GetString, ReadTxn, Text, Transact, Update};
 
 use quorum::hub::Hub;
 use quorum::web::MapAssets;
+use quorum::ws::Timing;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -31,6 +32,10 @@ struct Server {
 
 impl Server {
     async fn start() -> Server {
+        Server::start_with(Timing::default()).await
+    }
+
+    async fn start_with(timing: Timing) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hub = Hub::new();
@@ -42,7 +47,7 @@ impl Server {
         let task = tokio::spawn({
             let hub = hub.clone();
             async move {
-                quorum::serve(listener, hub, assets, async {
+                quorum::serve_with(listener, hub, assets, timing, async {
                     let _ = rx.await;
                 })
                 .await
@@ -328,4 +333,109 @@ async fn reconnect_after_restart_restores_text() {
     let mut b = Client::connect(s2.addr, "room-1").await;
     b.sync().await;
     assert_eq!(text_of(&b.doc), "hello");
+}
+
+#[tokio::test]
+async fn lone_client_gets_own_awareness_back() {
+    let s = Server::start().await;
+    let mut a = Client::connect(s.addr, "room-1").await;
+    let id = a.doc.client_id();
+    a.send(awareness(id, 1, r#"{"user":"a"}"#)).await;
+    match a.recv().await {
+        Message::Awareness(u) => assert_eq!(&*u.clients[&id].json, r#"{"user":"a"}"#),
+        m => panic!("expected awareness, got {m:?}"),
+    }
+}
+
+fn fast_timing() -> Timing {
+    Timing {
+        send_timeout: Duration::from_millis(500),
+        ping_interval: Duration::from_millis(100),
+        idle_timeout: Duration::from_millis(600),
+    }
+}
+
+async fn wait_conns(hub: &Hub, n: usize, within: Duration) {
+    timeout(within, async {
+        while hub.conn_count() != n {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("conn_count never reached {n} (now {})", hub.conn_count()));
+}
+
+#[tokio::test]
+async fn stalled_reader_is_disconnected() {
+    // Idle timeout is off so only the send timeout can end this connection.
+    let s = Server::start_with(Timing {
+        idle_timeout: Duration::from_secs(1000),
+        ..fast_timing()
+    })
+    .await;
+    // The stalled client announces itself, then never reads again.
+    let mut stalled = Client::connect(s.addr, "room-1").await;
+    let stalled_id = stalled.doc.client_id();
+    stalled
+        .send(awareness(stalled_id, 1, r#"{"user":"s"}"#))
+        .await;
+    let mut flooder = Client::connect(s.addr, "room-1").await;
+    wait_conns(&s.hub, 2, WAIT).await;
+
+    // Re-sending one 500 KiB update keeps the doc small (duplicates add no
+    // state) while every copy is relayed to the stalled client.
+    let big = flooder.append(&"x".repeat(500 * 1024));
+    let frame = Message::Sync(SyncMessage::Update(big)).encode_v1();
+    let flood = async {
+        // Up to the 60-message burst, then 30/s; the loop ends once the
+        // server has dropped the stalled connection.
+        for i in 0u32.. {
+            if s.hub.conn_count() == 1 {
+                return;
+            }
+            flooder.ws.send(Frame::binary(frame.clone())).await.unwrap();
+            if i >= 60 {
+                tokio::time::sleep(Duration::from_millis(35)).await;
+            }
+        }
+    };
+    timeout(Duration::from_secs(20), flood)
+        .await
+        .expect("stalled client was never disconnected");
+    wait_conns(&s.hub, 1, WAIT).await;
+
+    // The flooder is told the stalled client is gone.
+    loop {
+        if let Message::Awareness(u) = flooder.recv().await
+            && let Some(e) = u.clients.get(&stalled_id)
+            && &*e.json == "null"
+        {
+            break;
+        }
+    }
+    drop(stalled);
+}
+
+#[tokio::test]
+async fn silent_peer_is_dropped_but_responsive_peer_stays() {
+    let s = Server::start_with(fast_timing()).await;
+    // Never polled, so it never answers pings.
+    let silent = Client::connect(s.addr, "room-1").await;
+    let mut live = Client::connect(s.addr, "room-1").await;
+    wait_conns(&s.hub, 2, WAIT).await;
+
+    // Reading answers pings automatically; stay connected well past the
+    // idle timeout while the silent one is dropped.
+    let stay = async {
+        loop {
+            match live.ws.next().await {
+                Some(Ok(Frame::Close(_))) | None => panic!("live peer was closed"),
+                Some(Err(e)) => panic!("live peer errored: {e}"),
+                _ => {}
+            }
+        }
+    };
+    let _ = timeout(Duration::from_millis(2500), stay).await;
+    assert_eq!(s.hub.conn_count(), 1);
+    drop(silent);
 }

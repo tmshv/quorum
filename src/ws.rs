@@ -14,7 +14,10 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::hub::{Hub, Out, Peer};
-use crate::limits::{MAX_MESSAGE, MAX_STRIKES, OUTBOX, RATE_BURST, RATE_PER_SEC, close};
+use crate::limits::{
+    IDLE_TIMEOUT, MAX_MESSAGE, MAX_STRIKES, OUTBOX, PING_INTERVAL, RATE_BURST, RATE_PER_SEC,
+    SEND_TIMEOUT, close,
+};
 use crate::net::{client_ip, same_origin};
 use crate::rate::{Limiter, Verdict};
 use crate::room::RoomError;
@@ -22,9 +25,28 @@ use crate::room::RoomError;
 /// How long the writer gets to flush a close frame once the reader is done.
 const FLUSH_GRACE: Duration = Duration::from_secs(2);
 
+/// Liveness timings; injectable so tests need not wait for real minutes.
+#[derive(Clone, Copy)]
+pub struct Timing {
+    pub send_timeout: Duration,
+    pub ping_interval: Duration,
+    pub idle_timeout: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Timing {
+            send_timeout: SEND_TIMEOUT,
+            ping_interval: PING_INTERVAL,
+            idle_timeout: IDLE_TIMEOUT,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub hub: Arc<Hub>,
+    pub timing: Timing,
 }
 
 pub async fn handler(
@@ -40,7 +62,7 @@ pub async fn handler(
     let ip = client_ip(&headers, addr);
     ws.max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| connection(state.hub, room, ip, socket))
+        .on_upgrade(move |socket| connection(state, room, ip, socket))
 }
 
 fn close_message(code: u16) -> Message {
@@ -50,7 +72,8 @@ fn close_message(code: u16) -> Message {
     }))
 }
 
-async fn connection(hub: Arc<Hub>, room: String, ip: std::net::IpAddr, mut socket: WebSocket) {
+async fn connection(state: AppState, room: String, ip: std::net::IpAddr, mut socket: WebSocket) {
+    let AppState { hub, timing } = state;
     let (tx, rx) = mpsc::channel(OUTBOX);
     // The hub holds the only Sender: when it drops a slow peer the writer's
     // `recv()` returns `None`.
@@ -64,8 +87,8 @@ async fn connection(hub: Arc<Hub>, room: String, ip: std::net::IpAddr, mut socke
 
     let (sink, stream) = socket.split();
     let (stop_tx, stop_rx) = oneshot::channel();
-    let reader = read_loop(stream, &peer, stop_tx);
-    let writer = write_loop(sink, rx, stop_rx);
+    let reader = read_loop(stream, &peer, stop_tx, timing.idle_timeout);
+    let writer = write_loop(sink, rx, stop_rx, timing);
     tokio::pin!(reader, writer);
 
     tokio::select! {
@@ -82,7 +105,12 @@ async fn write_loop(
     mut sink: SplitSink<WebSocket, Message>,
     mut outbox: mpsc::Receiver<Out>,
     mut stop: oneshot::Receiver<u16>,
+    timing: Timing,
 ) {
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + timing.ping_interval,
+        timing.ping_interval,
+    );
     loop {
         let msg = tokio::select! {
             out = outbox.recv() => match out {
@@ -95,18 +123,27 @@ async fn write_loop(
                 // Reader ended without asking for a close frame.
                 Err(_) => return,
             },
+            _ = ping.tick() => Message::Ping(Vec::new().into()),
         };
         let closing = matches!(msg, Message::Close(_));
-        if sink.send(msg).await.is_err() || closing {
-            return;
+        // A client that stops reading must not hold the connection forever.
+        match tokio::time::timeout(timing.send_timeout, sink.send(msg)).await {
+            Ok(Ok(())) if !closing => {}
+            _ => return,
         }
     }
 }
 
-async fn read_loop(mut stream: SplitStream<WebSocket>, peer: &Peer, stop: oneshot::Sender<u16>) {
+async fn read_loop(
+    mut stream: SplitStream<WebSocket>,
+    peer: &Peer,
+    stop: oneshot::Sender<u16>,
+    idle_timeout: Duration,
+) {
     let mut limiter = Limiter::new(RATE_PER_SEC, RATE_BURST, MAX_STRIKES);
     let code = loop {
-        let Some(Ok(msg)) = stream.next().await else {
+        // Any frame, pongs included, counts as activity.
+        let Ok(Some(Ok(msg))) = tokio::time::timeout(idle_timeout, stream.next()).await else {
             return;
         };
         match msg {

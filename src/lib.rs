@@ -21,9 +21,14 @@ pub const VERSION: &str = match option_env!("QUORUM_VERSION") {
 
 /// The whole app: static routes plus the WebSocket endpoint.
 pub fn app(hub: Arc<Hub>, assets: Arc<dyn Assets>) -> Router {
+    app_with(hub, assets, ws::Timing::default())
+}
+
+/// `app` with explicit liveness timings (for tests).
+pub fn app_with(hub: Arc<Hub>, assets: Arc<dyn Assets>, timing: ws::Timing) -> Router {
     let ws = Router::new()
         .route("/ws/{room}", get(ws::handler))
-        .with_state(ws::AppState { hub });
+        .with_state(ws::AppState { hub, timing });
     web::routes(assets).merge(ws)
 }
 
@@ -34,7 +39,19 @@ pub async fn serve(
     assets: Arc<dyn Assets>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let app = app(hub, assets).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    serve_with(listener, hub, assets, ws::Timing::default(), shutdown).await
+}
+
+/// `serve` with explicit liveness timings (for tests).
+pub async fn serve_with(
+    listener: tokio::net::TcpListener,
+    hub: Arc<Hub>,
+    assets: Arc<dyn Assets>,
+    timing: ws::Timing,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let app =
+        app_with(hub, assets, timing).into_make_service_with_connect_info::<std::net::SocketAddr>();
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await

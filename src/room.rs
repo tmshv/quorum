@@ -18,6 +18,8 @@ pub type ConnId = u64;
 pub enum Reply {
     ToSender(Vec<u8>),
     ToOthers(Vec<u8>),
+    /// Everyone including the sender (awareness: keeps lone clients alive).
+    ToAll(Vec<u8>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +88,7 @@ impl Room {
                     return Ok(Vec::new());
                 }
                 let relay = Message::Awareness(AwarenessUpdate { clients: accepted }).encode_v1();
-                Ok(vec![Reply::ToOthers(relay)])
+                Ok(vec![Reply::ToAll(relay)])
             }
             Message::AwarenessQuery => Ok(self
                 .awareness_message()
@@ -395,7 +397,7 @@ mod tests {
             .handle(2, &aw_multi(&[(7, 3, "{}"), (8, 1, "{}")]))
             .unwrap();
         assert_eq!(r.len(), 1);
-        let Reply::ToOthers(b) = &r[0] else { panic!() };
+        let Reply::ToAll(b) = &r[0] else { panic!() };
         assert_eq!(aw_ids(b), vec![8]);
     }
 
