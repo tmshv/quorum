@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
-import { ensureDefaultLang, resolveClash } from "../src/session";
+import { ensureDefaultLang, normalizeUser, resolveClash } from "../src/session";
 import { PALETTE } from "../src/names";
 import type { Identity } from "../src/identity";
 
@@ -49,5 +49,39 @@ describe("resolveClash", () => {
     const r = resolveClash(me, others, () => 0)!;
     expect(r.name).not.toBe("Deadlock");
     expect(r.color).not.toBe(me.color);
+  });
+});
+
+describe("normalizeUser", () => {
+  it("keeps a valid user and derives colorLight", () => {
+    expect(normalizeUser({ name: "Bob", color: "#AABBCC" })).toEqual({
+      name: "Bob", color: "#AABBCC", colorLight: "#AABBCC33",
+    });
+  });
+  it("rejects CSS injection in colour", () => {
+    const u = normalizeUser({ name: "x", color: "red;background:url(http://evil)", colorLight: "url(x)" }, 2);
+    expect(u.color).toBe(PALETTE[2]);
+    expect(u.colorLight).toBe(PALETTE[2] + "33");
+  });
+  it("sanitises names and tolerates junk", () => {
+    expect(normalizeUser({ name: "a\u0000b\n  c", color: "#000000" }).name).toBe("ab c");
+    expect(normalizeUser({ name: 5 }).name).toBe("anonymous");
+    expect(normalizeUser(null).name).toBe("anonymous");
+    expect(normalizeUser("str").color).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+});
+
+describe("undo wiring", () => {
+  it("Y.UndoManager tracking local origin does not revert remote edits", () => {
+    const a = new Y.Doc();
+    const b = new Y.Doc();
+    a.on("update", (u: Uint8Array, o: unknown) => o !== "remote" && Y.applyUpdate(b, u, "remote"));
+    b.on("update", (u: Uint8Array, o: unknown) => o !== "remote" && Y.applyUpdate(a, u, "remote"));
+    const ta = a.getText("code");
+    const um = new Y.UndoManager(ta);
+    ta.insert(0, "mine");
+    b.getText("code").insert(0, "peer-");
+    um.undo();
+    expect(ta.toString()).toBe("peer-");
   });
 });

@@ -1,8 +1,17 @@
-import { Compartment } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
-import { basicSetup } from "codemirror";
+import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { defaultKeymap } from "@codemirror/commands";
+import {
+  bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting,
+} from "@codemirror/language";
+import { lintKeymap } from "@codemirror/lint";
+import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { Compartment, EditorState, Prec } from "@codemirror/state";
+import {
+  EditorView, crosshairCursor, drawSelection, dropCursor, highlightActiveLine,
+  highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers, rectangularSelection,
+} from "@codemirror/view";
 import * as Y from "yjs";
-import { yCollab } from "y-codemirror.next";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { type LanguageId, languageById } from "./languages";
 import type { Session } from "./session";
 import { type ThemeId, themeById } from "./themes";
@@ -13,6 +22,37 @@ export interface EditorHandle {
   setLanguage(id: LanguageId): Promise<void>;
   destroy(): void;
 }
+
+/**
+ * `basicSetup` without `history()`/`historyKeymap`: CodeMirror's history would
+ * record (and undo) other people's edits. Undo goes through the Y.UndoManager.
+ */
+export const collabSetup = [
+  lineNumbers(),
+  highlightActiveLineGutter(),
+  highlightSpecialChars(),
+  foldGutter(),
+  drawSelection(),
+  dropCursor(),
+  EditorState.allowMultipleSelections.of(true),
+  indentOnInput(),
+  syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+  bracketMatching(),
+  closeBrackets(),
+  autocompletion(),
+  rectangularSelection(),
+  crosshairCursor(),
+  highlightActiveLine(),
+  highlightSelectionMatches(),
+  keymap.of([
+    ...closeBracketsKeymap,
+    ...defaultKeymap,
+    ...searchKeymap,
+    ...foldKeymap,
+    ...completionKeymap,
+    ...lintKeymap,
+  ]),
+];
 
 const fontTheme = EditorView.theme({
   "&": { height: "100%" },
@@ -33,8 +73,9 @@ export function createEditor(
     parent,
     doc: session.text.toString(),
     extensions: [
-      basicSetup,
+      collabSetup,
       yCollab(session.text, session.awareness, { undoManager }),
+      Prec.highest(keymap.of(yUndoManagerKeymap)),
       fontTheme,
       theme.of(themeById(opts.theme).extension),
       language.of([]),

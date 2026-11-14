@@ -4,7 +4,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { type Identity, saveIdentity } from "./identity";
 import { DEFAULT_LANGUAGE, type LanguageId } from "./languages";
 import { PALETTE, type Rng, pickColor, pickName, sanitizeName } from "./names";
-import { type Status, statusFromClose } from "./status";
+import { INITIAL_STATUS, type Status, type StatusEvent, nextStatus, statusFromClose } from "./status";
 
 export interface Person {
   clientId: number;
@@ -56,15 +56,26 @@ export interface SessionOptions {
   WebSocketImpl?: typeof WebSocket;
 }
 
-interface UserState {
-  name?: unknown;
-  color?: unknown;
+const COLOR_RE = /^#[0-9a-f]{6}$/i;
+
+export interface NormalizedUser {
+  name: string;
+  color: string;
+  colorLight: string;
 }
 
-function userOf(state: unknown): { name: string; color: string } | null {
-  const user = (state as { user?: UserState } | undefined)?.user;
-  if (!user || typeof user.color !== "string") return null;
-  return { name: sanitizeName(typeof user.name === "string" ? user.name : ""), color: user.color };
+/** Validate an untrusted remote awareness `user` value. */
+export function normalizeUser(user: unknown, clientId = 0): NormalizedUser {
+  const u = (typeof user === "object" && user !== null ? user : {}) as Record<string, unknown>;
+  const color =
+    typeof u.color === "string" && COLOR_RE.test(u.color)
+      ? u.color
+      : PALETTE[Math.abs(clientId) % PALETTE.length]!;
+  return {
+    name: sanitizeName(typeof u.name === "string" ? u.name : ""),
+    color,
+    colorLight: color + "33",
+  };
 }
 
 export function createSession(opts: SessionOptions): Session {
@@ -101,64 +112,64 @@ export function createSession(opts: SessionOptions): Session {
   const statusCbs = new Set<(s: Status) => void>();
   const langCbs = new Set<(id: LanguageId) => void>();
 
-  let status: Status = "connecting";
-  let stopped = false; // closed with a code that stops the provider
-  const setStatus = (s: Status) => {
-    if (s === status) return;
-    status = s;
-    statusCbs.forEach((cb) => cb(s));
+  let st = INITIAL_STATUS;
+  const dispatch = (ev: StatusEvent) => {
+    const prev = st.status;
+    st = nextStatus(st, ev);
+    if (st.status !== prev) statusCbs.forEach((cb) => cb(st.status));
   };
 
   const people = (): Person[] => {
     const out: Person[] = [];
     awareness.getStates().forEach((state, clientId) => {
-      const u = userOf(state);
-      if (u) out.push({ clientId, ...u, self: clientId === awareness.clientID });
+      const user = (state as { user?: unknown }).user;
+      if (user === undefined) return;
+      const u = normalizeUser(user, clientId);
+      out.push({ clientId, name: u.name, color: u.color, self: clientId === awareness.clientID });
     });
     return out;
   };
 
-  let clashChecked = false;
+  // Registered before the editor's own awareness listener, so remote carets
+  // render normalised values. Mutates the local copy only; nothing is re-broadcast.
   const onAwareness = () => {
+    awareness.getStates().forEach((state, clientId) => {
+      if (clientId === awareness.clientID) return;
+      const s = state as { user?: unknown };
+      if (s.user !== undefined) s.user = normalizeUser(s.user, clientId);
+    });
     const list = people();
     peopleCbs.forEach((cb) => cb(list));
-    const others = list.filter((p) => !p.self);
-    if (!clashChecked && others.length > 0) {
-      clashChecked = true;
-      const next = resolveClash(identity, others);
-      if (next) {
-        identity = next;
-        session.identity = next;
-        saveIdentity(room, next, storage);
-        publish();
-      }
-    }
   };
   awareness.on("change", onAwareness);
 
-  const onSync = (synced: boolean) => {
-    if (synced) {
-      ensureDefaultLang(meta);
-      provider.off("sync", onSync);
+  // Only the joiner avoids names already in the room: check once, at first sync,
+  // when the server's awareness snapshot has been applied.
+  let synced = false;
+  const onSync = (isSynced: boolean) => {
+    if (!isSynced) return;
+    dispatch({ type: "sync" });
+    if (synced) return;
+    synced = true;
+    ensureDefaultLang(meta);
+    const others = people().filter((p) => !p.self);
+    const next = resolveClash(identity, others);
+    if (next) {
+      identity = next;
+      session.identity = next;
+      saveIdentity(room, next, storage);
+      publish();
     }
   };
   provider.on("sync", onSync);
 
-  const onClose = (event: CloseEvent | null) => {
+  provider.on("connection-close", (event: CloseEvent | null) => {
     if (event == null) return; // closed locally
-    const s = statusFromClose(event.code);
-    stopped = s.fatal || s.retryable;
-    setStatus(s.status);
-  };
-  provider.on("connection-close", onClose);
-
-  provider.on("status", ({ status: st }: { status: "connected" | "disconnected" | "connecting" }) => {
-    if (st === "connected") {
-      stopped = false;
-      setStatus("connected");
-    } else if (!stopped) {
-      setStatus(st === "connecting" ? "connecting" : "reconnecting");
-    }
+    dispatch({ type: "close", code: event.code });
+  });
+  provider.on("status", ({ status: s }: { status: "connected" | "disconnected" | "connecting" }) => {
+    if (s === "connecting") dispatch({ type: "connecting" });
+    else if (s === "disconnected") dispatch({ type: "disconnected" });
   });
 
   const onMeta = (e: Y.YMapEvent<unknown>) => {
@@ -199,8 +210,7 @@ export function createSession(opts: SessionOptions): Session {
       publish();
     },
     retry() {
-      stopped = false;
-      setStatus("connecting");
+      dispatch({ type: "retry" });
       provider.connect();
     },
     destroy() {
