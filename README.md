@@ -3,16 +3,16 @@
 A shared code editor. Open a room, send the link, and everyone with it edits
 the same text in real time.
 
-Nothing is stored. The server only relays changes between the people in a
-room, and a room exists only while someone is in it. When the last person
-leaves, the code is gone.
+Nothing is stored on disk. The server keeps a room's document in memory while
+someone is in the room and relays changes between the people in it. When the
+last person leaves, the room and its code are gone.
 
 The whole thing ships as one Rust binary with the web page embedded.
 
 ## Features
 
-- **Rooms by URL.** Every path is a room: `https://your.host/kernel-panic-42`.
-  The front page suggests a random name.
+- **Rooms by URL.** Every single-segment path is a room:
+  `https://your.host/kernel-panic-42`. The front page suggests a random name.
 - **Shared editor.** [CodeMirror 6](https://codemirror.net) bound to a
   [Yjs](https://yjs.dev) document, so concurrent edits merge without
   conflicts.
@@ -47,40 +47,53 @@ browser ──ws──▶ reverse proxy ──▶ quorum (yrs) ──▶ other b
 
 ### Limits
 
-All limits are hard caps in [`src/limits.rs`](src/limits.rs), so the server's
-memory use is bounded.
+All server limits are hard caps in [`src/limits.rs`](src/limits.rs), so the
+server's memory use is bounded. The editor's length limit is a guard in the
+web client.
 
-| Limit                         | Value                     |
-| ----------------------------- | ------------------------- |
-| Connections in total          | 1000                      |
-| Connections per IP            | 8                         |
-| Rooms                         | 200                       |
-| People per room               | 16                        |
-| Incoming message              | 1 MiB                     |
-| Document per room             | 1 MiB (encoded state)     |
-| Awareness state               | 4 KiB                     |
-| Awareness client IDs per conn | 8                         |
-| Message rate per connection   | 30/s, burst 60            |
-| Refused messages before drop  | 100                       |
-| Outgoing queue per connection | 512 messages              |
-| Send timeout                  | 10 s                      |
-| Ping interval                 | 30 s                      |
-| Idle timeout                  | 90 s                      |
-| Name length                   | 32 characters             |
-| Room name                     | `[a-z0-9][a-z0-9-]{0,39}` |
+| Limit                         | Value                             |
+| ----------------------------- | --------------------------------- |
+| Connections in total          | 1000                              |
+| Connections per IP            | 8                                 |
+| Rooms                         | 200                               |
+| People per room               | 16                                |
+| Incoming message              | 2 MiB                             |
+| Document per room             | 1 MiB (encoded state)             |
+| Paste or typing in the editor | about 900,000 characters          |
+| Awareness state               | 4 KiB                             |
+| Awareness client IDs per conn | 8                                 |
+| Removed client IDs remembered | 1024 per room                     |
+| Message rate per connection   | 120/s, burst 360                  |
+| Refused messages before drop  | 100 within a strike window        |
+| Strike window                 | ends after 10 s without a refusal |
+| Outgoing queue per connection | 512 messages                      |
+| Send timeout                  | 10 s                              |
+| Ping interval                 | 30 s                              |
+| Idle timeout                  | 90 s                              |
+| Name length                   | 32 characters                     |
+| Room name                     | `[a-z0-9][a-z0-9-]{0,39}`         |
+
+The message rate is a token bucket per connection. A document update (a Yjs
+sync message) is never dropped, because later updates depend on it: an update
+over the budget closes the connection with 4004. A cursor or name update over
+the budget is dropped and counts as a refusal, since the sender's next state
+replaces it anyway. Cursor and name updates that change nothing (echoes of
+states the server already has) cost nothing. The editor refuses local edits
+that would grow the code past about 900,000 characters and says so, instead of
+sending a change the server would reject.
 
 When a connection is refused or dropped, the server closes the WebSocket with
 one of these codes:
 
-| Code | Name          | Meaning                                    | Client retries |
-| ---- | ------------- | ------------------------------------------ | -------------- |
-| 4000 | BAD_ROOM      | room name fails the regex                  | no             |
-| 4001 | ROOM_FULL     | 16 people already in the room              | on user click  |
-| 4002 | BUSY          | total, per-IP or room-count cap reached    | on user click  |
-| 4003 | DOC_TOO_LARGE | update would push doc past 1 MiB           | no (reload)    |
-| 4004 | RATE_LIMITED  | more than 100 refused messages             | on user click  |
-| 4005 | TOO_SLOW      | outbox full, reader cannot keep up         | yes (auto)     |
-| 4006 | PROTOCOL      | undecodable message or oversized awareness | no             |
+| Code | Name          | Meaning                                       | Client retries |
+| ---- | ------------- | --------------------------------------------- | -------------- |
+| 4000 | BAD_ROOM      | room name fails the regex                     | no             |
+| 4001 | ROOM_FULL     | 16 people already in the room                 | on user click  |
+| 4002 | BUSY          | total, per-IP or room-count cap reached       | on user click  |
+| 4003 | DOC_TOO_LARGE | doc would pass 1 MiB, or message over 2 MiB   | no (reload)    |
+| 4004 | RATE_LIMITED  | update over budget, or more than 100 refusals | on user click  |
+| 4005 | TOO_SLOW      | outbox full, reader cannot keep up            | yes (auto)     |
+| 4006 | PROTOCOL      | undecodable message or oversized awareness    | no             |
 
 ## Running
 
@@ -94,8 +107,16 @@ just build
 ./bin/quorum --listen 127.0.0.1:20481
 ```
 
-`cargo install --git https://github.com/tmshv/quorum` also works, but only
-after `just web` has produced `web/app/dist` in a checkout it can build from.
+To install into Cargo's bin directory, build the web app in a checkout first:
+
+```sh
+git clone https://github.com/tmshv/quorum && cd quorum
+just web
+cargo install --path .
+```
+
+`cargo install --git` does not work: a fresh clone has no `web/app/dist`, so
+the binary it builds answers every page with 503.
 
 Flags:
 
@@ -166,7 +187,8 @@ just release 2.0.0   # an explicit version
 The recipe checks that the working tree is clean, runs the tests, creates an
 annotated `vX.Y.Z` tag and pushes the current branch and the tag. The
 [release workflow](.github/workflows/release.yml) then tests and builds
-static binaries for Linux (musl) and macOS, amd64 and arm64. It publishes a
+binaries for Linux and macOS, amd64 and arm64. The Linux builds are static
+(musl); the macOS builds link the system library. It publishes a
 GitHub release with the list of changes since the previous tag, download links
 and SHA-256 checksums.
 
