@@ -1,0 +1,27 @@
+[package]
+name = "quorum"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+yrs = "0.28"
+rust-embed = "8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+mime_guess = "2"
+
+[dev-dependencies]
+tokio-tungstenite = "0.30"
+tower = { version = "0.5", features = ["util"] }
+futures-util = "0.3"
+http-body-util = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

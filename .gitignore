@@ -1,0 +1,5 @@
+/target/
+/dist/
+/bin/
+node_modules/
+web/app/dist/
