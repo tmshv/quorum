@@ -5,13 +5,13 @@ import {
 } from "@codemirror/language";
 import { lintKeymap } from "@codemirror/lint";
 import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
-import { Compartment, EditorState, Prec } from "@codemirror/state";
+import { Compartment, EditorState, type Extension, Prec } from "@codemirror/state";
 import {
   EditorView, crosshairCursor, drawSelection, dropCursor, highlightActiveLine,
   highlightActiveLineGutter, highlightSpecialChars, keymap, lineNumbers, rectangularSelection,
 } from "@codemirror/view";
 import * as Y from "yjs";
-import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import { yCollab, ySyncAnnotation, yUndoManagerKeymap } from "y-codemirror.next";
 import { type LanguageId, languageById } from "./languages";
 import type { Session } from "./session";
 import { type ThemeId, themeById } from "./themes";
@@ -54,6 +54,24 @@ export const collabSetup = [
   ]),
 ];
 
+/** Local edits may not grow the document past this; the server caps it at 1 MiB encoded. */
+export const MAX_DOC_CHARS = 900_000;
+
+/**
+ * Rejects local transactions that would grow the document past `max`
+ * characters and calls `onTooLarge`. Remote (y-sync) changes always pass,
+ * as do edits that do not grow the document.
+ */
+export function sizeGuard(max: number, onTooLarge: () => void): Extension {
+  return EditorState.transactionFilter.of((tr) => {
+    if (!tr.docChanged || tr.annotation(ySyncAnnotation) !== undefined) return tr;
+    const len = tr.newDoc.length;
+    if (len <= max || len <= tr.startState.doc.length) return tr;
+    onTooLarge();
+    return [];
+  });
+}
+
 const fontTheme = EditorView.theme({
   "&": { height: "100%" },
   ".cm-scroller": { fontFamily: '"JetBrains Mono", ui-monospace, monospace' },
@@ -63,7 +81,7 @@ const fontTheme = EditorView.theme({
 export function createEditor(
   parent: HTMLElement,
   session: Session,
-  opts: { theme: ThemeId; lang: LanguageId },
+  opts: { theme: ThemeId; lang: LanguageId; onTooLarge?: () => void },
 ): EditorHandle {
   const theme = new Compartment();
   const language = new Compartment();
@@ -74,6 +92,7 @@ export function createEditor(
     doc: session.text.toString(),
     extensions: [
       collabSetup,
+      sizeGuard(MAX_DOC_CHARS, opts.onTooLarge ?? (() => {})),
       yCollab(session.text, session.awareness, { undoManager }),
       Prec.highest(keymap.of(yUndoManagerKeymap)),
       fontTheme,

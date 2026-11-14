@@ -147,7 +147,11 @@ export function mountRoom(root: HTMLElement, room: string): void {
   shell.append(bar, editorHost);
   root.replaceChildren(shell);
 
-  const editor = createEditor(editorHost, session, { theme: themePref, lang });
+  const editor = createEditor(editorHost, session, {
+    theme: themePref,
+    lang,
+    onTooLarge: () => toast("Too large: the room's code is limited to about 1 MB"),
+  });
 
   themeSelect.addEventListener("change", () => {
     const def = themeById(themeSelect.value);

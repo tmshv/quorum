@@ -1,6 +1,6 @@
 import * as Y from "yjs";
 import { WebsocketProvider } from "y-websocket";
-import type { Awareness } from "y-protocols/awareness";
+import { type Awareness, encodeAwarenessUpdate, removeAwarenessStates } from "y-protocols/awareness";
 import { type Identity, saveIdentity } from "./identity";
 import { DEFAULT_LANGUAGE, type LanguageId } from "./languages";
 import { PALETTE, type Rng, pickColor, pickName, sanitizeName } from "./names";
@@ -78,6 +78,106 @@ export function normalizeUser(user: unknown, clientId = 0): NormalizedUser {
   };
 }
 
+/** y-websocket's message type for awareness updates. */
+const MESSAGE_AWARENESS = 1;
+
+function writeVarUint(out: number[], n: number): void {
+  while (n > 0x7f) {
+    out.push(0x80 | (n & 0x7f));
+    n = Math.floor(n / 128);
+  }
+  out.push(n);
+}
+
+export interface AwarenessChanges {
+  added: number[];
+  updated: number[];
+  removed: number[];
+}
+
+/**
+ * The y-websocket awareness message for the local client, or null when the
+ * changes concern remote clients only (those are never re-broadcast).
+ */
+export function localAwarenessMessage(
+  awareness: Awareness,
+  changes: AwarenessChanges,
+): Uint8Array<ArrayBuffer> | null {
+  const id = awareness.clientID;
+  const { added, updated, removed } = changes;
+  if (!added.includes(id) && !updated.includes(id) && !removed.includes(id)) return null;
+  const update = encodeAwarenessUpdate(awareness, [id]);
+  const head: number[] = [MESSAGE_AWARENESS];
+  writeVarUint(head, update.length);
+  const msg = new Uint8Array(head.length + update.length);
+  msg.set(head);
+  msg.set(update, head.length);
+  return msg;
+}
+
+/**
+ * Stock y-websocket re-sends every awareness change it applies, so each
+ * client echoes everyone else's cursor moves to the server. Replace its
+ * handler with one that sends only our own state. Returns the undo.
+ */
+export function sendLocalAwarenessOnly(provider: WebsocketProvider): () => void {
+  const { awareness } = provider;
+  awareness.off("update", provider._awarenessUpdateHandler);
+  const onUpdate = (changes: AwarenessChanges) => {
+    const msg = localAwarenessMessage(awareness, changes);
+    const ws = provider.ws;
+    if (msg && provider.wsconnected && ws && ws.readyState === ws.OPEN) ws.send(msg);
+  };
+  awareness.on("update", onUpdate);
+  return () => awareness.off("update", onUpdate);
+}
+
+/**
+ * Drops every remote client, clocks included. y-websocket removes remote
+ * states on disconnect but keeps their clocks, so after a reconnect the
+ * server's greeting (same clocks) would be ignored until each peer renews.
+ */
+export function forgetRemotePeers(awareness: Awareness, origin: unknown = "reconnect"): void {
+  const remote = [...awareness.meta.keys()].filter((id) => id !== awareness.clientID);
+  removeAwarenessStates(awareness, remote, origin);
+  for (const id of remote) awareness.meta.delete(id);
+}
+
+function peopleOf(awareness: Awareness): Person[] {
+  const out: Person[] = [];
+  awareness.getStates().forEach((state, clientId) => {
+    const user = (state as { user?: unknown }).user;
+    if (user === undefined) return;
+    const u = normalizeUser(user, clientId);
+    out.push({ clientId, name: u.name, color: u.color, self: clientId === awareness.clientID });
+  });
+  return out;
+}
+
+/**
+ * Normalises remote `user` values in place and calls `cb` when the list of
+ * people (id, name, colour) changes; cursor moves alone do not notify.
+ * Register before the editor's awareness listener so carets render
+ * normalised values. Nothing is re-broadcast. Returns the unsubscribe.
+ */
+export function watchPeople(awareness: Awareness, cb: (p: Person[]) => void): () => void {
+  let key = "";
+  const onChange = () => {
+    awareness.getStates().forEach((state, clientId) => {
+      if (clientId === awareness.clientID) return;
+      const s = state as { user?: unknown };
+      if (s.user !== undefined) s.user = normalizeUser(s.user, clientId);
+    });
+    const list = peopleOf(awareness);
+    const next = JSON.stringify(list.map((p) => [p.clientId, p.name, p.color]));
+    if (next === key) return;
+    key = next;
+    cb(list);
+  };
+  awareness.on("change", onChange);
+  return () => awareness.off("change", onChange);
+}
+
 export function createSession(opts: SessionOptions): Session {
   const { room, serverUrl, storage } = opts;
   const doc = new Y.Doc();
@@ -99,6 +199,7 @@ export function createSession(opts: SessionOptions): Session {
     },
   });
   const awareness = provider.awareness;
+  const stopAwarenessRelay = sendLocalAwarenessOnly(provider);
 
   const publish = () =>
     awareness.setLocalStateField("user", {
@@ -119,29 +220,8 @@ export function createSession(opts: SessionOptions): Session {
     if (st.status !== prev) statusCbs.forEach((cb) => cb(st.status));
   };
 
-  const people = (): Person[] => {
-    const out: Person[] = [];
-    awareness.getStates().forEach((state, clientId) => {
-      const user = (state as { user?: unknown }).user;
-      if (user === undefined) return;
-      const u = normalizeUser(user, clientId);
-      out.push({ clientId, name: u.name, color: u.color, self: clientId === awareness.clientID });
-    });
-    return out;
-  };
-
-  // Registered before the editor's own awareness listener, so remote carets
-  // render normalised values. Mutates the local copy only; nothing is re-broadcast.
-  const onAwareness = () => {
-    awareness.getStates().forEach((state, clientId) => {
-      if (clientId === awareness.clientID) return;
-      const s = state as { user?: unknown };
-      if (s.user !== undefined) s.user = normalizeUser(s.user, clientId);
-    });
-    const list = people();
-    peopleCbs.forEach((cb) => cb(list));
-  };
-  awareness.on("change", onAwareness);
+  const people = (): Person[] => peopleOf(awareness);
+  const stopPeople = watchPeople(awareness, (list) => peopleCbs.forEach((cb) => cb(list)));
 
   // Only the joiner avoids names already in the room: check once, at first sync,
   // when the server's awareness snapshot has been applied.
@@ -164,8 +244,11 @@ export function createSession(opts: SessionOptions): Session {
   provider.on("sync", onSync);
 
   provider.on("connection-close", (event: CloseEvent | null) => {
-    if (event == null) return; // closed locally
-    dispatch({ type: "close", code: event.code });
+    // Status first, so the people list drops its baseline before the removals
+    // below (no "left" toasts for a disconnect). A null event is a local close.
+    if (event != null) dispatch({ type: "close", code: event.code });
+    else if (provider.wsconnected) dispatch({ type: "disconnected" });
+    forgetRemotePeers(awareness, provider);
   });
   provider.on("status", ({ status: s }: { status: "connected" | "disconnected" | "connecting" }) => {
     if (s === "connecting") dispatch({ type: "connecting" });
@@ -215,11 +298,12 @@ export function createSession(opts: SessionOptions): Session {
     },
     destroy() {
       meta.unobserve(onMeta);
-      awareness.off("change", onAwareness);
+      stopPeople();
       peopleCbs.clear();
       statusCbs.clear();
       langCbs.clear();
       provider.destroy();
+      stopAwarenessRelay();
       doc.destroy();
     },
   };
