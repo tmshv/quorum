@@ -1,0 +1,17 @@
+{
+  "name": "@quorum/app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@quorum/core": "*"
+  },
+  "devDependencies": {
+    "vite": "^8.0.0"
+  }
+}

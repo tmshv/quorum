@@ -5,6 +5,14 @@ export default defineConfig({
     projects: [
       {
         test: {
+          name: "app",
+          root: "./app",
+          environment: "node",
+          include: ["test/**/*.test.ts"],
+        },
+      },
+      {
+        test: {
           name: "core",
           root: "./core",
           environment: "node",
