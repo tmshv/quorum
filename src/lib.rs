@@ -1,3 +1,4 @@
+pub mod hub;
 pub mod limits;
 pub mod rate;
 pub mod room;
