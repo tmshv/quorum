@@ -173,6 +173,9 @@ export function mountRoom(root: HTMLElement, room: string): void {
 
   mountPeople(people, session);
 
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) location.reload();
+  });
   window.addEventListener("pagehide", () => {
     editor.destroy();
     session.destroy();

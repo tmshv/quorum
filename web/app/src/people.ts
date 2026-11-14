@@ -1,14 +1,27 @@
-import type { Person, Session } from "@quorum/core";
+import type { Person, Session, Status } from "@quorum/core";
 import { toast } from "./toast";
+
+export function diffPeople(
+  prev: readonly Person[],
+  next: readonly Person[],
+): { joined: Person[]; left: Person[] } {
+  const before = new Set(prev.filter((p) => !p.self).map((p) => p.clientId));
+  const after = new Set(next.filter((p) => !p.self).map((p) => p.clientId));
+  return {
+    joined: next.filter((p) => !p.self && !before.has(p.clientId)),
+    left: prev.filter((p) => !p.self && !after.has(p.clientId)),
+  };
+}
 
 /**
  * Render the people list into `container` and toast joins/leaves.
- * Toasts are skipped for self and for the first snapshot.
+ * The baseline is seeded when the session reports "connected" (first sync) and
+ * dropped on any other status, so reconnects do not toast everyone.
  */
 export function mountPeople(container: HTMLElement, session: Session): () => void {
   let editing = false;
   let latest: Person[] = session.people();
-  let known: Map<number, string> | null = null;
+  let known: Person[] | null = null;
 
   const startRename = (nameEl: HTMLElement) => {
     editing = true;
@@ -70,16 +83,23 @@ export function mountPeople(container: HTMLElement, session: Session): () => voi
   };
 
   const onPeople = (people: Person[]) => {
-    const next = new Map<number, string>();
-    for (const p of people) if (!p.self) next.set(p.clientId, p.name);
     if (known) {
-      for (const [id, name] of next) if (!known.has(id)) toast(`${name} joined`);
-      for (const [id, name] of known) if (!next.has(id)) toast(`${name} left`);
+      const { joined, left } = diffPeople(known, people);
+      for (const p of joined) toast(`${p.name} joined`);
+      for (const p of left) toast(`${p.name} left`);
+      known = people;
     }
-    known = next;
     render(people);
+  };
+  const onStatus = (status: Status) => {
+    known = status === "connected" ? session.people() : null;
   };
 
   render(latest);
-  return session.onPeople(onPeople);
+  const offPeople = session.onPeople(onPeople);
+  const offStatus = session.onStatus(onStatus);
+  return () => {
+    offPeople();
+    offStatus();
+  };
 }
