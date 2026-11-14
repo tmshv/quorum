@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::sync::mpsc;
 
 use crate::limits::{MAX_CONNS, MAX_CONNS_PER_IP, MAX_PER_ROOM, MAX_ROOMS, close, valid_room};
-use crate::room::{ConnId, Reply, Room, RoomError};
+use crate::room::{ConnId, Kind, Reply, Room, RoomError, message_kind};
 
 /// What a connection's writer task sends to its socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,9 +212,12 @@ impl Hub {
 }
 
 impl Peer {
-    pub fn handle(&self, data: &[u8]) -> Result<(), RoomError> {
+    /// Applies one message and fans out the replies. Returns `false` for an
+    /// awareness message that changed nothing (an echo): it costs no budget.
+    pub fn handle(&self, data: &[u8]) -> Result<bool, RoomError> {
         let mut inner = self.slot.lock();
         let replies = inner.room.handle(self.id, data)?;
+        let charge = !(message_kind(data) == Kind::Awareness && replies.is_empty());
         for reply in replies {
             match reply {
                 Reply::ToSender(b) => inner.send(self.id, &b),
@@ -222,7 +225,7 @@ impl Peer {
                 Reply::ToAll(b) => inner.broadcast_all(&b),
             }
         }
-        Ok(())
+        Ok(charge)
     }
 }
 
@@ -353,5 +356,29 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, OUTBOX);
+    }
+
+    fn awareness_msg(client: u64, clock: u32) -> Vec<u8> {
+        use std::sync::Arc;
+        use yrs::sync::awareness::{AwarenessUpdate, AwarenessUpdateEntry};
+        let clients = HashMap::from([(
+            yrs::ClientID::new(client),
+            AwarenessUpdateEntry {
+                clock,
+                json: Arc::from("{}"),
+            },
+        )]);
+        Message::Awareness(AwarenessUpdate { clients }).encode_v1()
+    }
+
+    #[tokio::test]
+    async fn rejected_awareness_echo_is_not_charged() {
+        let hub = Hub::new();
+        let (a, _rx_a) = join(&hub, "r", ip(1)).unwrap();
+        let (b, _rx_b) = join(&hub, "r", ip(2)).unwrap();
+        assert_eq!(a.handle(&awareness_msg(7, 3)), Ok(true));
+        // B re-sends A's state at the same clock: nothing new.
+        assert_eq!(b.handle(&awareness_msg(7, 3)), Ok(false));
+        assert_eq!(a.handle(&update_msg("hi")), Ok(true));
     }
 }

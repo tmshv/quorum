@@ -6,13 +6,20 @@ pub const MAX_CONNS: usize = 1000;
 pub const MAX_CONNS_PER_IP: usize = 8;
 pub const MAX_ROOMS: usize = 200;
 pub const MAX_PER_ROOM: usize = 16;
-pub const MAX_MESSAGE: usize = 1 << 20;
+/// Larger than `MAX_DOC`, so an oversized paste is read and refused by the
+/// room as "document too large" instead of failing the socket read.
+pub const MAX_MESSAGE: usize = 2 << 20;
 pub const MAX_DOC: usize = 1 << 20;
 pub const MAX_AWARENESS_STATE: usize = 4 << 10;
 pub const MAX_AWARENESS_IDS_PER_CONN: usize = 8;
-pub const RATE_PER_SEC: f64 = 30.0;
-pub const RATE_BURST: f64 = 60.0;
+pub const RATE_PER_SEC: f64 = 120.0;
+pub const RATE_BURST: f64 = 360.0;
+/// Refused messages within one strike window before the connection is closed.
 pub const MAX_STRIKES: u32 = 100;
+/// Strikes reset after this long without a refusal.
+pub const STRIKE_RESET: Duration = Duration::from_secs(10);
+/// Client IDs whose removal each room remembers (stale echoes are refused).
+pub const MAX_TOMBSTONES: usize = 1024;
 pub const OUTBOX: usize = 512;
 
 /// A socket write that takes longer than this ends the connection.

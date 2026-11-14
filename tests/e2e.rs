@@ -18,6 +18,7 @@ use yrs::updates::encoder::Encode;
 use yrs::{ClientID, Doc, GetString, ReadTxn, Text, Transact, Update};
 
 use quorum::hub::Hub;
+use quorum::rate::Budget;
 use quorum::web::MapAssets;
 use quorum::ws::Timing;
 
@@ -352,6 +353,7 @@ fn fast_timing() -> Timing {
         send_timeout: Duration::from_millis(500),
         ping_interval: Duration::from_millis(100),
         idle_timeout: Duration::from_millis(600),
+        ..Timing::default()
     }
 }
 
@@ -387,7 +389,7 @@ async fn stalled_reader_is_disconnected() {
     let big = flooder.append(&"x".repeat(500 * 1024));
     let frame = Message::Sync(SyncMessage::Update(big)).encode_v1();
     let flood = async {
-        // Up to the 60-message burst, then 30/s; the loop ends once the
+        // A burst, then well under the rate limit; the loop ends once the
         // server has dropped the stalled connection.
         for i in 0u32.. {
             if s.hub.conn_count() == 1 {
@@ -438,4 +440,174 @@ async fn silent_peer_is_dropped_but_responsive_peer_stays() {
     let _ = timeout(Duration::from_millis(2500), stay).await;
     assert_eq!(s.hub.conn_count(), 1);
     drop(silent);
+}
+
+/// A server whose connections get `burst` messages and (almost) no refill.
+async fn start_with_budget(burst: f64, per_sec: f64) -> Server {
+    Server::start_with(Timing {
+        budget: Budget {
+            per_sec,
+            burst,
+            ..Budget::default()
+        },
+        ..Timing::default()
+    })
+    .await
+}
+
+/// Applies every update that arrives until `quiet` passes without a frame;
+/// returns how many updates were applied.
+async fn drain_updates(c: &mut Client, quiet: Duration) -> usize {
+    let mut n = 0;
+    while let Ok(Some(Ok(f))) = timeout(quiet, c.ws.next()).await {
+        if let Frame::Binary(b) = f
+            && let Ok(Message::Sync(SyncMessage::Update(u))) = Message::decode_v1(&b)
+        {
+            c.apply(&u);
+            n += 1;
+        }
+    }
+    n
+}
+
+#[tokio::test]
+async fn flood_of_updates_converges_exactly() {
+    let s = Server::start().await;
+    let mut a = Client::connect(s.addr, "room-1").await;
+    let mut b = Client::connect(s.addr, "room-1").await;
+    for i in 0..300 {
+        let ch = char::from(b'a' + (i % 26) as u8).to_string();
+        let u = a.append(&ch);
+        if a.ws
+            .send(Frame::binary(
+                Message::Sync(SyncMessage::Update(u)).encode_v1(),
+            ))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+    let sv = a.doc.transact().state_vector();
+    let _ =
+        a.ws.send(Frame::binary(
+            Message::Sync(SyncMessage::SyncStep1(sv)).encode_v1(),
+        ))
+        .await;
+    // Either A is still connected (its SyncStep2 arrives) or it was told it
+    // was rate limited; never connected with missing data.
+    let connected = loop {
+        match a.recv_frame().await {
+            Frame::Binary(bytes) => {
+                if let Ok(Message::Sync(SyncMessage::SyncStep2(_))) = Message::decode_v1(&bytes) {
+                    break true;
+                }
+            }
+            Frame::Close(Some(cf)) => {
+                assert_eq!(u16::from(cf.code), 4004);
+                break false;
+            }
+            f => panic!("unexpected frame {f:?}"),
+        }
+    };
+    drain_updates(&mut b, Duration::from_millis(500)).await;
+    let (got, sent) = (text_of(&b.doc), text_of(&a.doc));
+    if connected {
+        assert_eq!(got, sent);
+    } else {
+        assert!(sent.starts_with(&got), "B diverged: {got:?}");
+    }
+    // Nothing is waiting on a missing update.
+    assert!(b.doc.transact().store().pending_update().is_none());
+}
+
+#[tokio::test]
+async fn rate_limited_sync_closes_not_drops() {
+    let s = start_with_budget(5.0, 0.0).await;
+    let mut a = Client::connect(s.addr, "room-1").await;
+    let mut b = Client::connect(s.addr, "room-1").await;
+    for i in 0..10u8 {
+        let u = a.append(&char::from(b'a' + i).to_string());
+        let frame = Frame::binary(Message::Sync(SyncMessage::Update(u)).encode_v1());
+        if a.ws.send(frame).await.is_err() {
+            break;
+        }
+    }
+    assert_eq!(a.recv_close().await, 4004);
+    let n = drain_updates(&mut b, Duration::from_millis(300)).await;
+    assert_eq!(n, 5);
+    assert_eq!(text_of(&b.doc), "abcde");
+}
+
+#[tokio::test]
+async fn over_budget_awareness_is_dropped_not_closed() {
+    let s = start_with_budget(2.0, 20.0).await;
+    let mut a = Client::connect(s.addr, "room-1").await;
+    let id = a.doc.client_id();
+    for clock in 1..=6 {
+        a.send(awareness(id, clock, r#"{"user":"a"}"#)).await;
+    }
+    // The bucket refills, and A is still connected.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    a.sync().await;
+}
+
+#[tokio::test]
+async fn awareness_echoes_are_not_charged() {
+    let s = start_with_budget(2.0, 0.0).await;
+    let mut a = Client::connect(s.addr, "room-1").await;
+    let mut b = Client::connect(s.addr, "room-1").await;
+    let id = a.doc.client_id();
+    a.send(awareness(id, 1, r#"{"user":"a"}"#)).await;
+    assert!(matches!(b.recv().await, Message::Awareness(_)));
+    // B echoes A's state back, like a stock y-websocket client does.
+    for _ in 0..10 {
+        b.send(awareness(id, 1, r#"{"user":"a"}"#)).await;
+    }
+    // B's budget is untouched: two syncs still fit.
+    b.sync().await;
+    b.sync().await;
+}
+
+#[tokio::test]
+async fn oversize_update_closes_4003_and_keeps_text() {
+    let s = Server::start().await;
+    let mut a = Client::connect(s.addr, "room-1").await;
+    let mut b = Client::connect(s.addr, "room-1").await;
+    let u = a.append("hello");
+    a.send(Message::Sync(SyncMessage::Update(u))).await;
+    b.recv_update().await;
+
+    let big = a.append(&"x".repeat(1536 * 1024));
+    a.send(Message::Sync(SyncMessage::Update(big))).await;
+    assert_eq!(a.recv_close().await, 4003);
+
+    assert_eq!(drain_updates(&mut b, Duration::from_millis(300)).await, 0);
+    assert_eq!(text_of(&b.doc), "hello");
+    let mut c = Client::connect(s.addr, "room-1").await;
+    c.sync().await;
+    assert_eq!(text_of(&c.doc), "hello");
+}
+
+#[tokio::test]
+async fn frame_over_message_cap_closes_4003() {
+    let s = Server::start().await;
+    let a = Client::connect(s.addr, "room-1").await;
+    let mut frame = vec![0u8; (2 << 20) + 1024];
+    frame[1] = 2; // sync update; the payload is never read
+    // Like a browser: the send runs in the background while we read.
+    let (mut tx, mut rx) = a.ws.split();
+    let send = tokio::spawn(async move {
+        let _ = tx.send(Frame::binary(frame)).await;
+        tx
+    });
+    let code = loop {
+        match timeout(WAIT, rx.next()).await.expect("recv timed out") {
+            Some(Ok(Frame::Close(Some(cf)))) => break u16::from(cf.code),
+            Some(Ok(_)) => continue,
+            other => panic!("no close frame: {other:?}"),
+        }
+    };
+    assert_eq!(code, 4003);
+    drop(send);
 }

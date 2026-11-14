@@ -10,9 +10,29 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{ClientID, Doc, ReadTxn, StateVector, Transact, Update};
 
-use crate::limits::{MAX_AWARENESS_IDS_PER_CONN, MAX_AWARENESS_STATE, MAX_DOC};
+use crate::limits::{MAX_AWARENESS_IDS_PER_CONN, MAX_AWARENESS_STATE, MAX_DOC, MAX_TOMBSTONES};
 
 pub type ConnId = u64;
+
+/// A y-websocket message's type, read from its first varint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Sync,
+    Awareness,
+    AwarenessQuery,
+    Other,
+}
+
+/// Classifies a frame without decoding it. Multi-byte or missing type
+/// varints are `Other` (and fail decoding later).
+pub fn message_kind(data: &[u8]) -> Kind {
+    match data.first() {
+        Some(0) => Kind::Sync,
+        Some(1) => Kind::Awareness,
+        Some(3) => Kind::AwarenessQuery,
+        _ => Kind::Other,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply {
@@ -33,6 +53,9 @@ pub struct Room {
     approx_size: usize,
     awareness: HashMap<ClientID, (u32, Arc<str>)>,
     owners: HashMap<ConnId, HashSet<ClientID>>,
+    /// Clock at which a client ID was removed; older states for it are
+    /// stale echoes and must not bring it back.
+    tombstones: HashMap<ClientID, u32>,
 }
 
 impl Default for Room {
@@ -48,6 +71,7 @@ impl Room {
             approx_size: 0,
             awareness: HashMap::new(),
             owners: HashMap::new(),
+            tombstones: HashMap::new(),
         }
     }
 
@@ -62,6 +86,8 @@ impl Room {
         out
     }
 
+    /// Applies one message. An awareness message none of whose entries were
+    /// accepted (an echo or a stale state) yields no replies.
     pub fn handle(&mut self, from: ConnId, data: &[u8]) -> Result<Vec<Reply>, RoomError> {
         let msg = Message::decode_v1(data).map_err(|_| RoomError::Protocol)?;
         match msg {
@@ -152,7 +178,7 @@ impl Room {
         let is_accepted =
             |this: &Self, id: &ClientID, e: &AwarenessUpdateEntry| match this.awareness.get(id) {
                 Some((clock, _)) => e.clock > *clock,
-                None => &*e.json != "null",
+                None => &*e.json != "null" && this.tombstones.get(id).is_none_or(|t| e.clock > *t),
             };
         let added = update
             .clients
@@ -174,7 +200,9 @@ impl Room {
                 for set in self.owners.values_mut() {
                     set.remove(&id);
                 }
+                self.bury(id, entry.clock);
             } else {
+                self.tombstones.remove(&id);
                 if !self.awareness.contains_key(&id) {
                     self.owners.entry(from).or_default().insert(id);
                 }
@@ -183,6 +211,18 @@ impl Room {
             accepted.insert(id, entry);
         }
         Ok(accepted)
+    }
+
+    /// Remembers that `id` was removed at `clock`; when full, forgets an
+    /// arbitrary older removal.
+    fn bury(&mut self, id: ClientID, clock: u32) {
+        if self.tombstones.len() >= MAX_TOMBSTONES
+            && !self.tombstones.contains_key(&id)
+            && let Some(&evict) = self.tombstones.keys().next()
+        {
+            self.tombstones.remove(&evict);
+        }
+        self.tombstones.insert(id, clock);
     }
 
     fn awareness_message(&self) -> Option<Vec<u8>> {
@@ -469,5 +509,57 @@ mod tests {
             Message::Sync(SyncMessage::Update(_))
         ));
         assert_eq!(room.text("code"), "hi");
+    }
+
+    #[test]
+    fn stale_echo_after_removal_is_refused() {
+        let mut room = Room::new();
+        room.handle(1, &awareness_msg(7, 3, "{\"a\":1}")).unwrap();
+        room.handle(1, &awareness_msg(7, 4, "null")).unwrap();
+        // B's echo of A's old state was in flight while A left.
+        let r = room.handle(2, &awareness_msg(7, 3, "{\"a\":1}")).unwrap();
+        assert!(r.is_empty());
+        assert_eq!(room.greeting().len(), 1);
+        // A genuinely newer state comes back.
+        let r = room.handle(1, &awareness_msg(7, 5, "{\"a\":2}")).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(&*entry_for(&room.greeting()[1], 7).json, "{\"a\":2}");
+    }
+
+    #[test]
+    fn newer_state_clears_tombstone() {
+        let mut room = Room::new();
+        room.handle(1, &awareness_msg(7, 3, "{}")).unwrap();
+        room.handle(1, &awareness_msg(7, 4, "null")).unwrap();
+        room.handle(1, &awareness_msg(7, 5, "{}")).unwrap();
+        room.handle(1, &awareness_msg(7, 6, "null")).unwrap();
+        assert_eq!(room.tombstones.len(), 1);
+        room.handle(1, &awareness_msg(7, 7, "{}")).unwrap();
+        assert!(room.tombstones.is_empty());
+    }
+
+    #[test]
+    fn tombstones_are_bounded() {
+        let mut room = Room::new();
+        for id in 0..(MAX_TOMBSTONES as u64 + 10) {
+            room.handle(1, &awareness_msg(id, 1, "{}")).unwrap();
+            room.handle(1, &awareness_msg(id, 2, "null")).unwrap();
+        }
+        assert!(room.tombstones.len() <= MAX_TOMBSTONES);
+    }
+
+    #[test]
+    fn classifies_messages_by_type() {
+        let sync = update_msg(insert_update("x"));
+        assert_eq!(message_kind(&sync), Kind::Sync);
+        assert_eq!(message_kind(&awareness_msg(7, 1, "{}")), Kind::Awareness);
+        assert_eq!(
+            message_kind(&Message::AwarenessQuery.encode_v1()),
+            Kind::AwarenessQuery
+        );
+        assert_eq!(message_kind(&Message::Auth(None).encode_v1()), Kind::Other);
+        assert_eq!(message_kind(&[]), Kind::Other);
+        // A multi-byte varint is never one of the known types.
+        assert_eq!(message_kind(&[0x80, 0x00]), Kind::Other);
     }
 }
