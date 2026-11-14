@@ -7,6 +7,7 @@ pub const MAX_PER_ROOM: usize = 16;
 pub const MAX_MESSAGE: usize = 1 << 20;
 pub const MAX_DOC: usize = 1 << 20;
 pub const MAX_AWARENESS_STATE: usize = 4 << 10;
+pub const MAX_AWARENESS_IDS_PER_CONN: usize = 8;
 pub const RATE_PER_SEC: f64 = 30.0;
 pub const RATE_BURST: f64 = 60.0;
 pub const MAX_STRIKES: u32 = 100;

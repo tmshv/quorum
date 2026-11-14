@@ -10,7 +10,7 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{ClientID, Doc, ReadTxn, StateVector, Transact, Update};
 
-use crate::limits::{MAX_AWARENESS_STATE, MAX_DOC};
+use crate::limits::{MAX_AWARENESS_IDS_PER_CONN, MAX_AWARENESS_STATE, MAX_DOC};
 
 pub type ConnId = u64;
 
@@ -81,8 +81,12 @@ impl Room {
                 {
                     return Err(RoomError::Protocol);
                 }
-                self.apply_awareness(from, update);
-                Ok(vec![Reply::ToOthers(data.to_vec())])
+                let accepted = self.apply_awareness(from, update)?;
+                if accepted.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let relay = Message::Awareness(AwarenessUpdate { clients: accepted }).encode_v1();
+                Ok(vec![Reply::ToOthers(relay)])
             }
             Message::AwarenessQuery => Ok(self
                 .awareness_message()
@@ -135,22 +139,48 @@ impl Room {
         Ok(())
     }
 
-    fn apply_awareness(&mut self, from: ConnId, update: AwarenessUpdate) {
-        for (id, entry) in update.clients {
-            self.owners.entry(from).or_default().insert(id);
-            let newer = match self.awareness.get(&id) {
-                Some((clock, _)) => entry.clock > *clock,
-                None => true,
+    /// Applies newer entries; returns only the accepted ones. A connection
+    /// owns a client ID only if it introduced it (echoes of other peers'
+    /// states must not make the echoer an owner).
+    fn apply_awareness(
+        &mut self,
+        from: ConnId,
+        update: AwarenessUpdate,
+    ) -> Result<HashMap<ClientID, AwarenessUpdateEntry>, RoomError> {
+        let is_accepted =
+            |this: &Self, id: &ClientID, e: &AwarenessUpdateEntry| match this.awareness.get(id) {
+                Some((clock, _)) => e.clock > *clock,
+                None => &*e.json != "null",
             };
-            if !newer {
+        let added = update
+            .clients
+            .iter()
+            .filter(|(id, e)| !self.awareness.contains_key(id) && is_accepted(self, id, e))
+            .count();
+        let owned = self.owners.get(&from).map_or(0, |s| s.len());
+        if owned + added > MAX_AWARENESS_IDS_PER_CONN {
+            return Err(RoomError::Protocol);
+        }
+
+        let mut accepted = HashMap::new();
+        for (id, entry) in update.clients {
+            if !is_accepted(self, &id, &entry) {
                 continue;
             }
             if &*entry.json == "null" {
                 self.awareness.remove(&id);
+                for set in self.owners.values_mut() {
+                    set.remove(&id);
+                }
             } else {
-                self.awareness.insert(id, (entry.clock, entry.json));
+                if !self.awareness.contains_key(&id) {
+                    self.owners.entry(from).or_default().insert(id);
+                }
+                self.awareness.insert(id, (entry.clock, entry.json.clone()));
             }
+            accepted.insert(id, entry);
         }
+        Ok(accepted)
     }
 
     fn awareness_message(&self) -> Option<Vec<u8>> {
@@ -320,5 +350,122 @@ mod tests {
     fn garbage_is_protocol_error() {
         let mut room = Room::new();
         assert_eq!(room.handle(1, &[0xff, 0xff]), Err(RoomError::Protocol));
+    }
+
+    fn aw_ids(bytes: &[u8]) -> Vec<u64> {
+        let Message::Awareness(u) = Message::decode_v1(bytes).unwrap() else {
+            panic!("expected awareness")
+        };
+        let mut v: Vec<u64> = u.clients.keys().map(|c| c.get()).collect();
+        v.sort();
+        v
+    }
+
+    fn aw_multi(entries: &[(u64, u32, &str)]) -> Vec<u8> {
+        let clients = entries
+            .iter()
+            .map(|(id, clock, json)| {
+                (
+                    ClientID::new(*id),
+                    AwarenessUpdateEntry {
+                        clock: *clock,
+                        json: Arc::from(*json),
+                    },
+                )
+            })
+            .collect();
+        Message::Awareness(AwarenessUpdate { clients }).encode_v1()
+    }
+
+    #[test]
+    fn echo_does_not_make_echoer_owner() {
+        let mut room = Room::new();
+        room.handle(1, &awareness_msg(7, 3, "{}")).unwrap();
+        let r = room.handle(2, &awareness_msg(7, 3, "{}")).unwrap();
+        assert!(r.is_empty());
+        assert!(room.remove_conn(2).is_none());
+        assert_eq!(room.greeting().len(), 2);
+    }
+
+    #[test]
+    fn mixed_update_broadcasts_only_newer_entries() {
+        let mut room = Room::new();
+        room.handle(1, &awareness_msg(7, 3, "{}")).unwrap();
+        let r = room
+            .handle(2, &aw_multi(&[(7, 3, "{}"), (8, 1, "{}")]))
+            .unwrap();
+        assert_eq!(r.len(), 1);
+        let Reply::ToOthers(b) = &r[0] else { panic!() };
+        assert_eq!(aw_ids(b), vec![8]);
+    }
+
+    #[test]
+    fn stale_clock_is_ignored() {
+        let mut room = Room::new();
+        room.handle(1, &awareness_msg(7, 3, "{\"a\":1}")).unwrap();
+        let r = room.handle(1, &awareness_msg(7, 2, "{\"a\":2}")).unwrap();
+        assert!(r.is_empty());
+        let e = entry_for(&room.greeting()[1], 7);
+        assert_eq!(&*e.json, "{\"a\":1}");
+    }
+
+    #[test]
+    fn incoming_null_removes_entry() {
+        let mut room = Room::new();
+        room.handle(1, &awareness_msg(7, 3, "{}")).unwrap();
+        let r = room.handle(1, &awareness_msg(7, 4, "null")).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(room.greeting().len(), 1);
+        assert!(room.remove_conn(1).is_none());
+    }
+
+    #[test]
+    fn too_many_awareness_ids_is_protocol_error() {
+        let mut room = Room::new();
+        let ids: Vec<(u64, u32, &str)> = (1..=9).map(|i| (i, 1, "{}")).collect();
+        assert_eq!(room.handle(1, &aw_multi(&ids)), Err(RoomError::Protocol));
+        assert_eq!(room.greeting().len(), 1);
+        let ok: Vec<(u64, u32, &str)> = (1..=8).map(|i| (i, 1, "{}")).collect();
+        assert!(room.handle(1, &aw_multi(&ok)).is_ok());
+        assert_eq!(
+            room.handle(1, &awareness_msg(99, 1, "{}")),
+            Err(RoomError::Protocol)
+        );
+    }
+
+    #[test]
+    fn awareness_query_returns_all_entries() {
+        let mut room = Room::new();
+        let q = Message::AwarenessQuery.encode_v1();
+        assert!(room.handle(2, &q).unwrap().is_empty());
+        room.handle(1, &aw_multi(&[(7, 1, "{}"), (8, 1, "{}")]))
+            .unwrap();
+        let r = room.handle(2, &q).unwrap();
+        assert_eq!(r.len(), 1);
+        let Reply::ToSender(b) = &r[0] else { panic!() };
+        assert_eq!(aw_ids(b), vec![7, 8]);
+    }
+
+    #[test]
+    fn auth_and_custom_are_ignored() {
+        let mut room = Room::new();
+        let a = Message::Auth(None).encode_v1();
+        let c = Message::Custom(9, vec![1, 2]).encode_v1();
+        assert!(room.handle(1, &a).unwrap().is_empty());
+        assert!(room.handle(1, &c).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_step2_is_applied_and_broadcast_as_update() {
+        let mut room = Room::new();
+        let m = Message::Sync(SyncMessage::SyncStep2(insert_update("hi"))).encode_v1();
+        let r = room.handle(1, &m).unwrap();
+        assert_eq!(r.len(), 1);
+        let Reply::ToOthers(b) = &r[0] else { panic!() };
+        assert!(matches!(
+            Message::decode_v1(b).unwrap(),
+            Message::Sync(SyncMessage::Update(_))
+        ));
+        assert_eq!(room.text("code"), "hi");
     }
 }
