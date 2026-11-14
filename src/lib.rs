@@ -4,11 +4,11 @@ pub mod net;
 pub mod rate;
 pub mod room;
 pub mod web;
+pub mod ws;
 
 use std::sync::Arc;
 
 use axum::Router;
-use axum::http::StatusCode;
 use axum::routing::get;
 
 use crate::hub::Hub;
@@ -20,7 +20,22 @@ pub const VERSION: &str = match option_env!("QUORUM_VERSION") {
 };
 
 /// The whole app: static routes plus the WebSocket endpoint.
-pub fn app(_hub: Arc<Hub>, assets: Arc<dyn Assets>) -> Router {
-    // Stub until the WebSocket handler lands.
-    web::routes(assets).route("/ws/{room}", get(|| async { StatusCode::NOT_IMPLEMENTED }))
+pub fn app(hub: Arc<Hub>, assets: Arc<dyn Assets>) -> Router {
+    let ws = Router::new()
+        .route("/ws/{room}", get(ws::handler))
+        .with_state(ws::AppState { hub });
+    web::routes(assets).merge(ws)
+}
+
+/// Serves `app` on `listener` until `shutdown` resolves.
+pub async fn serve(
+    listener: tokio::net::TcpListener,
+    hub: Arc<Hub>,
+    assets: Arc<dyn Assets>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let app = app(hub, assets).into_make_service_with_connect_info::<std::net::SocketAddr>();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }
