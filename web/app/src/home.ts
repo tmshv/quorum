@@ -1,5 +1,5 @@
 import { DEFAULT_LANGUAGE, LANGUAGES, type LanguageId, languageById, normalizeRoom, randomRoom } from "@quorum/core";
-import { Dices, icon } from "./icons";
+import { RefreshCw, icon } from "./icons";
 
 const LANG_KEY = "quorum:lang";
 
@@ -58,7 +58,9 @@ export function mountHome(root: HTMLElement): void {
   reroll.className = "icon-btn";
   reroll.title = "Pick another name";
   reroll.setAttribute("aria-label", "Pick another room name");
-  reroll.append(icon(Dices, 18));
+  reroll.append(icon(RefreshCw, 18));
+  // Keep focus in the input: a focus hop would flash the form's focus border.
+  reroll.addEventListener("mousedown", (e) => e.preventDefault());
   reroll.addEventListener("click", () => {
     input.value = randomRoom();
     input.focus();

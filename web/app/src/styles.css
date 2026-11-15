@@ -25,7 +25,7 @@ button { cursor: pointer; }
 /* Home */
 .home {
   min-height: 100dvh;
-  max-width: 40rem;
+  max-width: 56rem;
   margin: 0 auto;
   padding: max(48px, 14vh) 24px 48px;
 }
@@ -50,7 +50,7 @@ button { cursor: pointer; }
 }
 .host { color: var(--muted); white-space: nowrap; }
 .room-input {
-  flex: 1 1 8rem;
+  flex: 1 1 24ch;
   min-width: 0;
   padding: 10px 4px;
   border: 0;
@@ -81,10 +81,11 @@ button { cursor: pointer; }
   font-weight: 700;
 }
 .go:hover { opacity: 0.88; }
-@media (max-width: 640px) {
+@media (max-width: 760px) {
   .open-form { flex-wrap: wrap; padding-left: 12px; }
   .host { flex-basis: 100%; }
-  .go { flex: 1 1 100%; }
+  .room-input { flex-basis: calc(100% - 44px); }
+  .lang-select, .go { flex: 1 1 0; }
 }
 
 /* Room */

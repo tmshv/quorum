@@ -1,6 +1,6 @@
-import { ChevronDown, Dices, type IconNode, Link, Users, createElement } from "lucide";
+import { ChevronDown, RefreshCw, type IconNode, Link, Users, createElement } from "lucide";
 
-export { ChevronDown, Dices, Link, Users };
+export { ChevronDown, RefreshCw, Link, Users };
 
 /** A decorative Lucide icon; the surrounding control carries the label. */
 export function icon(node: IconNode, size = 16): SVGElement {
