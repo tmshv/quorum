@@ -29,6 +29,9 @@ The whole thing ships as one Rust binary with the web page embedded.
   from [thememirror](https://github.com/vadimdemedes/thememirror). Your choice
   is remembered in `localStorage`.
 - **Copy and download.** Copy the code or save it with a matching extension.
+- **Link previews.** Shared room links unfurl in chats and social networks
+  with a card showing the room's name, drawn by the server (`/og/<room>.png`).
+  Room pages carry `noindex`; `robots.txt` admits only link-preview bots.
 - **No accounts, no code execution.**
 
 ## How it works
@@ -134,6 +137,8 @@ the visitor's address from the first `X-Forwarded-For` entry, so the proxy
 **must overwrite** that header rather than append to it. Otherwise clients can
 spoof it and get around the per-IP cap. Never expose quorum directly to the
 internet. The WebSocket origin must match the `Host` the proxy forwards.
+Link previews build absolute URLs from `Host` and `X-Forwarded-Proto`, so the
+proxy should pass both (Caddy does by default).
 
 A [Caddy](https://caddyserver.com) site is enough:
 
@@ -202,4 +207,5 @@ build on every pull request and on pushes to the main branch.
 [MIT](LICENSE). Bundled third-party code keeps its own licenses:
 [thememirror](https://github.com/vadimdemedes/thememirror) (MIT) and
 [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono), shipped through
-`@fontsource/jetbrains-mono` (SIL OFL 1.1).
+`@fontsource/jetbrains-mono` and, for the preview cards, as TTF in
+[`assets/fonts`](assets/fonts) (SIL OFL 1.1, [text](assets/fonts/OFL.txt)).
