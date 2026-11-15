@@ -257,3 +257,50 @@ describe("forgetRemotePeers", () => {
     expect(me.getStates().has(2)).toBe(false);
   });
 });
+
+describe("ensureDefaultLang with a chosen language", () => {
+  it("uses the creator's pick on an empty room", () => {
+    const d = new Y.Doc();
+    ensureDefaultLang(d.getMap("meta"), "go");
+    expect(d.getMap("meta").get("lang")).toBe("go");
+  });
+  it("never overrides a room that already has one", () => {
+    const d = new Y.Doc();
+    d.getMap("meta").set("lang", "rust");
+    ensureDefaultLang(d.getMap("meta"), "go");
+    expect(d.getMap("meta").get("lang")).toBe("rust");
+  });
+});
+
+describe("presence", () => {
+  it("reports away peers and notifies when presence flips", () => {
+    const me = awarenessOf(1);
+    me.setLocalStateField("user", { name: "me", color: "#111111" });
+    const peer = awarenessOf(2);
+    peer.setLocalStateField("user", { name: "p", color: "#222222" });
+    const calls: Person[][] = [];
+    cleanups.push(watchPeople(me, (p) => calls.push(p)));
+
+    receive(me, peer, [2]);
+    expect(calls.at(-1)!.find((p) => p.clientId === 2)!.away).toBe(false);
+
+    peer.setLocalStateField("presence", "away");
+    receive(me, peer, [2]);
+    expect(calls).toHaveLength(2);
+    expect(calls.at(-1)!.find((p) => p.clientId === 2)!.away).toBe(true);
+
+    peer.setLocalStateField("presence", "active");
+    receive(me, peer, [2]);
+    expect(calls).toHaveLength(3);
+    expect(calls.at(-1)!.find((p) => p.clientId === 2)!.away).toBe(false);
+  });
+  it("treats junk presence as active", () => {
+    const me = awarenessOf(1);
+    const peer = awarenessOf(2);
+    peer.setLocalState({ user: { name: "p", color: "#222222" }, presence: { evil: true } });
+    const calls: Person[][] = [];
+    cleanups.push(watchPeople(me, (p) => calls.push(p)));
+    receive(me, peer, [2]);
+    expect(calls.at(-1)![0]!.away).toBe(false);
+  });
+});

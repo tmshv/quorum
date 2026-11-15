@@ -11,6 +11,8 @@ export interface Person {
   name: string;
   color: string;
   self: boolean;
+  /** Tab in the background or no input for a while. */
+  away: boolean;
 }
 
 export function ensureDefaultLang(meta: Y.Map<unknown>, lang: LanguageId = DEFAULT_LANGUAGE): void {
@@ -43,6 +45,8 @@ export interface Session {
   onStatus(cb: (s: Status) => void): () => void;
   onLang(cb: (id: LanguageId) => void): () => void;
   setLang(id: LanguageId): void;
+  /** Publish whether this tab is away (hidden or idle). */
+  setAway(away: boolean): void;
   rename(name: string): void;
   retry(): void;
   destroy(): void;
@@ -53,6 +57,8 @@ export interface SessionOptions {
   serverUrl: string;
   identity: Identity;
   storage: Storage | null;
+  /** Language for a brand-new room; ignored when the room already has one. */
+  initialLang?: LanguageId;
   WebSocketImpl?: typeof WebSocket;
 }
 
@@ -149,14 +155,15 @@ function peopleOf(awareness: Awareness): Person[] {
     const user = (state as { user?: unknown }).user;
     if (user === undefined) return;
     const u = normalizeUser(user, clientId);
-    out.push({ clientId, name: u.name, color: u.color, self: clientId === awareness.clientID });
+    const away = (state as { presence?: unknown }).presence === "away";
+    out.push({ clientId, name: u.name, color: u.color, self: clientId === awareness.clientID, away });
   });
   return out;
 }
 
 /**
  * Normalises remote `user` values in place and calls `cb` when the list of
- * people (id, name, colour) changes; cursor moves alone do not notify.
+ * people (id, name, colour, presence) changes; cursor moves alone do not notify.
  * Register before the editor's awareness listener so carets render
  * normalised values. Nothing is re-broadcast. Returns the unsubscribe.
  */
@@ -169,7 +176,7 @@ export function watchPeople(awareness: Awareness, cb: (p: Person[]) => void): ()
       if (s.user !== undefined) s.user = normalizeUser(s.user, clientId);
     });
     const list = peopleOf(awareness);
-    const next = JSON.stringify(list.map((p) => [p.clientId, p.name, p.color]));
+    const next = JSON.stringify(list.map((p) => [p.clientId, p.name, p.color, p.away]));
     if (next === key) return;
     key = next;
     cb(list);
@@ -231,7 +238,7 @@ export function createSession(opts: SessionOptions): Session {
     dispatch({ type: "sync" });
     if (synced) return;
     synced = true;
-    ensureDefaultLang(meta);
+    ensureDefaultLang(meta, opts.initialLang);
     const others = people().filter((p) => !p.self);
     const next = resolveClash(identity, others);
     if (next) {
@@ -285,6 +292,10 @@ export function createSession(opts: SessionOptions): Session {
     },
     setLang(id) {
       meta.set("lang", id);
+    },
+    setAway(away) {
+      const next = away ? "away" : "active";
+      if (awareness.getLocalState()?.presence !== next) awareness.setLocalStateField("presence", next);
     },
     rename(name) {
       identity = { ...identity, name: sanitizeName(name), edited: true };
