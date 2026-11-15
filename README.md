@@ -16,13 +16,15 @@ The whole thing ships as one Rust binary with the web page embedded.
 - **Shared editor.** [CodeMirror 6](https://codemirror.net) bound to a
   [Yjs](https://yjs.dev) document, so concurrent edits merge without
   conflicts.
-- **Live cursors and names.** See who is where, with colored cursors and
-  selections. Names are editable and kept per tab, never written to
-  `localStorage`.
+- **Live cursors and names.** See who is where: every cursor carries a name
+  flag, and selections show in the person's color. A floating panel lists
+  everyone as online or away (tab in the background or idle for two minutes).
+  Names are editable and kept per tab, never written to `localStorage`.
 - **Languages.** Syntax highlighting for JavaScript, TypeScript, Python, Go,
   Rust, Java, C, C++, SQL, JSON, GeoJSON, CSS, HTML, Swift, Kotlin,
-  Objective-C, Bash, Protobuf and plain text. The language is shared by the
-  room.
+  Objective-C, Bash, Protobuf and plain text. Pick the starting language
+  when you open a room; after that it is shared, and anyone can change it for
+  everyone.
 - **Two themes.** Cool Glow (dark, default) and Rosé Pine Dawn (light), both
   from [thememirror](https://github.com/vadimdemedes/thememirror). Your choice
   is remembered in `localStorage`.

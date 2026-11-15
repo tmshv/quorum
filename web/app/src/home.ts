@@ -1,7 +1,25 @@
-import { normalizeRoom, randomRoom } from "@quorum/core";
+import { DEFAULT_LANGUAGE, LANGUAGES, type LanguageId, languageById, normalizeRoom, randomRoom } from "@quorum/core";
+import { Dices, icon } from "./icons";
 
-const REROLL_ICON =
-  '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>';
+const LANG_KEY = "quorum:lang";
+
+function loadLangPref(): LanguageId {
+  try {
+    const raw = window.localStorage.getItem(LANG_KEY);
+    if (raw !== null && languageById(raw).id === raw) return raw as LanguageId;
+  } catch {
+    // storage blocked: default language
+  }
+  return DEFAULT_LANGUAGE;
+}
+
+function saveLangPref(id: LanguageId): void {
+  try {
+    window.localStorage.setItem(LANG_KEY, id);
+  } catch {
+    // storage blocked: not remembered
+  }
+}
 
 export function mountHome(root: HTMLElement): void {
   const main = document.createElement("main");
@@ -40,22 +58,31 @@ export function mountHome(root: HTMLElement): void {
   reroll.className = "icon-btn";
   reroll.title = "Pick another name";
   reroll.setAttribute("aria-label", "Pick another room name");
-  reroll.innerHTML = REROLL_ICON;
+  reroll.append(icon(Dices, 18));
   reroll.addEventListener("click", () => {
     input.value = randomRoom();
     input.focus();
   });
+
+  const lang = document.createElement("select");
+  lang.className = "lang-select";
+  lang.setAttribute("aria-label", "Language");
+  lang.title = "Starting language (anyone in the room can change it)";
+  for (const l of LANGUAGES) lang.append(new Option(l.label, l.id));
+  lang.value = loadLangPref();
 
   const go = document.createElement("button");
   go.type = "submit";
   go.className = "go";
   go.textContent = "Open room";
 
-  form.append(host, input, reroll, go);
+  form.append(host, input, reroll, lang, go);
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const room = normalizeRoom(input.value) || normalizeRoom(randomRoom());
-    location.assign("/" + room);
+    const id = languageById(lang.value).id;
+    saveLangPref(id);
+    location.assign("/" + room + "?lang=" + encodeURIComponent(id));
   });
 
   main.append(h1, lede, form, note);

@@ -1,4 +1,5 @@
 import type { Person, Session, Status } from "@quorum/core";
+import { ChevronDown, Users, icon } from "./icons";
 import { toast } from "./toast";
 
 export function diffPeople(
@@ -13,15 +14,50 @@ export function diffPeople(
   };
 }
 
+/** Wide screens start with the panel open; phones start with it folded. */
+const WIDE = "(min-width: 641px)";
+
 /**
- * Render the people list into `container` and toast joins/leaves.
- * The baseline is seeded when the session reports "connected" (first sync) and
+ * A floating panel over the editor listing everyone in the room with their
+ * presence, folding to a small "people" chip. Also toasts joins/leaves: the
+ * baseline is seeded when the session reports "connected" (first sync) and
  * dropped on any other status, so reconnects do not toast everyone.
  */
-export function mountPeople(container: HTMLElement, session: Session): () => void {
+export function mountPeople(panel: HTMLElement, session: Session): () => void {
   let editing = false;
   let latest: Person[] = session.people();
   let known: Person[] | null = null;
+
+  panel.className = "people-panel";
+  panel.setAttribute("aria-label", "People in this room");
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "people-toggle";
+  const count = document.createElement("span");
+  count.className = "people-count";
+  const stack = document.createElement("span");
+  stack.className = "people-stack";
+  stack.setAttribute("aria-hidden", "true");
+  const chevron = icon(ChevronDown, 14);
+  chevron.classList.add("chevron");
+  toggle.append(icon(Users, 16), count, stack, chevron);
+
+  const list = document.createElement("ul");
+  list.className = "people";
+  list.id = "people-list";
+  toggle.setAttribute("aria-controls", list.id);
+
+  const setOpen = (open: boolean) => {
+    list.hidden = !open;
+    panel.dataset.open = String(open);
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.title = open ? "Hide people" : "Show people";
+  };
+  setOpen(window.matchMedia(WIDE).matches);
+  toggle.addEventListener("click", () => setOpen(panel.dataset.open !== "true"));
+
+  panel.replaceChildren(toggle, list);
 
   const startRename = (nameEl: HTMLElement) => {
     editing = true;
@@ -48,18 +84,27 @@ export function mountPeople(container: HTMLElement, session: Session): () => voi
     input.select();
   };
 
+  const dot = (p: Person) => {
+    const d = document.createElement("span");
+    d.className = "dot";
+    d.style.setProperty("--c", p.color);
+    if (p.away) d.classList.add("away");
+    d.setAttribute("aria-hidden", "true");
+    return d;
+  };
+
   const render = (people: Person[]) => {
     latest = people;
+    count.textContent = String(people.length);
+    toggle.setAttribute("aria-label", `${people.length} ${people.length === 1 ? "person" : "people"} in this room`);
+    stack.replaceChildren(...people.slice(0, 5).map(dot));
     if (editing) return;
-    container.replaceChildren(
+    list.replaceChildren(
       ...people.map((p) => {
         const li = document.createElement("li");
         li.className = "person";
-        const dot = document.createElement("span");
-        dot.className = "dot";
-        dot.style.background = p.color;
-        dot.setAttribute("aria-hidden", "true");
-        li.append(dot);
+        if (p.away) li.classList.add("is-away");
+        li.append(dot(p));
         if (p.self) {
           const name = document.createElement("button");
           name.type = "button";
@@ -77,6 +122,10 @@ export function mountPeople(container: HTMLElement, session: Session): () => voi
           name.textContent = p.name;
           li.append(name);
         }
+        const state = document.createElement("span");
+        state.className = "presence";
+        state.textContent = p.away ? "away" : "online";
+        li.append(state);
         return li;
       }),
     );

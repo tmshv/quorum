@@ -13,8 +13,10 @@ import {
   themeById,
 } from "@quorum/core";
 import { applyChrome } from "./chrome";
+import { Link, icon } from "./icons";
 import { createMenu } from "./menu";
 import { mountPeople } from "./people";
+import { trackPresence } from "./presence";
 import { serverUrl } from "./route";
 import { toast } from "./toast";
 
@@ -71,6 +73,7 @@ function labelled(text: string, control: HTMLElement): HTMLElement {
 
 export function mountRoom(root: HTMLElement, room: string): void {
   const themePref = loadThemePref(storage("local"));
+  const initialLang = takeInitialLang(room);
   applyChrome(themeById(themePref), document.documentElement);
 
   const session = createSession({
@@ -78,6 +81,7 @@ export function mountRoom(root: HTMLElement, room: string): void {
     serverUrl: serverUrl(location),
     identity: loadIdentity(room, storage("session")),
     storage: storage("session"),
+    initialLang,
   });
 
   const shell = document.createElement("div");
@@ -94,11 +98,13 @@ export function mountRoom(root: HTMLElement, room: string): void {
 
   const copyLink = document.createElement("button");
   copyLink.type = "button";
-  copyLink.className = "btn";
-  copyLink.textContent = "Copy link";
+  copyLink.className = "icon-btn small";
+  copyLink.title = "Copy link";
+  copyLink.setAttribute("aria-label", "Copy room link");
+  copyLink.append(icon(Link, 16));
   copyLink.addEventListener("click", () => void copy(location.origin + "/" + room));
 
-  let lang: LanguageId = DEFAULT_LANGUAGE;
+  let lang: LanguageId = initialLang ?? DEFAULT_LANGUAGE;
   const initial = session.meta.get("lang");
   if (typeof initial === "string") lang = languageById(initial).id;
 
@@ -131,20 +137,21 @@ export function mountRoom(root: HTMLElement, room: string): void {
   retry.addEventListener("click", () => session.retry());
   pill.append(pillText, retry);
 
-  const people = document.createElement("ul");
-  people.className = "people";
-  people.setAttribute("aria-label", "People in this room");
-
   const controls = document.createElement("div");
   controls.className = "controls";
-  controls.append(copyLink, labelled("lang", langSelect), labelled("theme", themeSelect), menu, pill);
+  controls.append(labelled("lang", langSelect), labelled("theme", themeSelect), menu, pill);
 
-  bar.append(title, controls, people);
+  bar.append(title, copyLink, controls);
 
   const editorHost = document.createElement("main");
   editorHost.className = "editor";
 
-  shell.append(bar, editorHost);
+  const people = document.createElement("aside");
+  const stage = document.createElement("div");
+  stage.className = "stage";
+  stage.append(editorHost, people);
+
+  shell.append(bar, stage);
   root.replaceChildren(shell);
 
   const editor = createEditor(editorHost, session, {
@@ -176,12 +183,26 @@ export function mountRoom(root: HTMLElement, room: string): void {
   session.onStatus(showStatus);
 
   mountPeople(people, session);
+  const stopPresence = trackPresence((away) => session.setAway(away));
 
   window.addEventListener("pageshow", (e) => {
     if (e.persisted) location.reload();
   });
   window.addEventListener("pagehide", () => {
+    stopPresence();
     editor.destroy();
     session.destroy();
   });
+}
+
+/**
+ * The language picked on the home page arrives as `?lang=`; it only seeds a
+ * brand-new room. Drop it from the address bar so shared links stay clean.
+ */
+function takeInitialLang(room: string): LanguageId | undefined {
+  const raw = new URLSearchParams(location.search).get("lang");
+  if (raw === null) return undefined;
+  history.replaceState(null, "", "/" + room + location.hash);
+  const def = languageById(raw);
+  return def.id === raw ? def.id : undefined;
 }

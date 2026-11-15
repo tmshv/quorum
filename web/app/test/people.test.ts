@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Person } from "@quorum/core";
 import { diffPeople } from "../src/people";
 
-const p = (clientId: number, name: string, self = false): Person => ({ clientId, name, color: "#000000", self });
+const p = (clientId: number, name: string, self = false): Person => ({ clientId, name, color: "#000000", self, away: false });
 
 describe("diffPeople", () => {
   it("reports joiners and leavers by clientId", () => {
