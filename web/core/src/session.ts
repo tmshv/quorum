@@ -19,19 +19,48 @@ export function ensureDefaultLang(meta: Y.Map<unknown>, lang: LanguageId = DEFAU
   if (!meta.has("lang")) meta.set("lang", lang);
 }
 
+/** When someone joined, for settling who keeps a clashing name or colour. */
+export interface Seniority {
+  clientId: number;
+  /** Join time (ms since epoch) as the client reported it. */
+  since: number;
+}
+
+export interface Rival extends Seniority {
+  name: string;
+  color: string;
+}
+
+/** True when `a` joined before `b`; equal times fall back to the client id. */
+export function joinedBefore(a: Seniority, b: Seniority): boolean {
+  return a.since < b.since || (a.since === b.since && a.clientId < b.clientId);
+}
+
+/**
+ * The identity to switch to when someone who joined earlier already uses our
+ * name or colour, or null to keep ours. The later joiner always gives way, so
+ * people already in the room are never renamed by a newcomer, and two people
+ * who joined at once settle on one rename. A name typed by hand is kept; a
+ * colour only changes while a free one is left.
+ */
 export function resolveClash(
   me: Identity,
-  others: readonly { name: string; color: string }[],
+  mine: Seniority,
+  others: readonly Rival[],
   rng: Rng = Math.random,
 ): Identity | null {
+  const seniors = others.filter((o) => joinedBefore(o, mine));
   const names = new Set(others.map((o) => o.name));
   const colors = new Set(others.map((o) => o.color));
   let { name, color } = me;
-  if (!me.edited && names.has(name)) name = pickName(names, rng);
-  if (colors.has(color)) color = pickColor(colors, rng);
+  if (!me.edited && seniors.some((o) => o.name === name)) name = pickName(names, rng);
+  if (seniors.some((o) => o.color === color) && PALETTE.some((c) => !colors.has(c))) {
+    color = pickColor(colors, rng);
+  }
   if (name === me.name && color === me.color) return null;
   return { ...me, name, color };
 }
+
 
 export interface Session {
   doc: Y.Doc;
@@ -68,6 +97,8 @@ export interface NormalizedUser {
   name: string;
   color: string;
   colorLight: string;
+  /** Join time; missing or junk sorts last, so a bad value never wins a clash. */
+  since: number;
 }
 
 /** Validate an untrusted remote awareness `user` value. */
@@ -81,7 +112,40 @@ export function normalizeUser(user: unknown, clientId = 0): NormalizedUser {
     name: sanitizeName(typeof u.name === "string" ? u.name : ""),
     color,
     colorLight: color + "33",
+    since: typeof u.since === "number" && Number.isFinite(u.since) ? u.since : Number.MAX_SAFE_INTEGER,
   };
+}
+
+/**
+ * Keeps names and colours unique: on every awareness change, re-checks the
+ * local identity against everyone else and calls `apply` with the new one
+ * when we must give way (see `resolveClash`). Checking once at join is not
+ * enough: two tabs joining at once may not see each other yet. Returns the
+ * unsubscribe; runs once immediately.
+ */
+export function dedupeNames(
+  awareness: Awareness,
+  identity: () => Identity,
+  apply: (next: Identity) => void,
+): () => void {
+  const check = () => {
+    const me = awareness.clientID;
+    const local = (awareness.getLocalState() as { user?: unknown } | null)?.user;
+    if (local === undefined) return;
+    const mine = { clientId: me, since: normalizeUser(local, me).since };
+    const others: Rival[] = [];
+    awareness.getStates().forEach((state, clientId) => {
+      const user = (state as { user?: unknown }).user;
+      if (clientId === me || user === undefined) return;
+      const u = normalizeUser(user, clientId);
+      others.push({ clientId, since: u.since, name: u.name, color: u.color });
+    });
+    const next = resolveClash(identity(), mine, others);
+    if (next) apply(next);
+  };
+  awareness.on("change", check);
+  check();
+  return () => awareness.off("change", check);
 }
 
 /** y-websocket's message type for awareness updates. */
@@ -208,11 +272,13 @@ export function createSession(opts: SessionOptions): Session {
   const awareness = provider.awareness;
   const stopAwarenessRelay = sendLocalAwarenessOnly(provider);
 
+  const since = Date.now();
   const publish = () =>
     awareness.setLocalStateField("user", {
       name: identity.name,
       color: identity.color,
       colorLight: identity.color + "33",
+      since,
     });
   publish();
 
@@ -230,8 +296,9 @@ export function createSession(opts: SessionOptions): Session {
   const people = (): Person[] => peopleOf(awareness);
   const stopPeople = watchPeople(awareness, (list) => peopleCbs.forEach((cb) => cb(list)));
 
-  // Only the joiner avoids names already in the room: check once, at first sync,
-  // when the server's awareness snapshot has been applied.
+  // Name and colour clashes are settled from the first sync on, when the
+  // server's awareness snapshot has been applied, and on every change after.
+  let stopDedupe = () => {};
   let synced = false;
   const onSync = (isSynced: boolean) => {
     if (!isSynced) return;
@@ -239,14 +306,12 @@ export function createSession(opts: SessionOptions): Session {
     if (synced) return;
     synced = true;
     ensureDefaultLang(meta, opts.initialLang);
-    const others = people().filter((p) => !p.self);
-    const next = resolveClash(identity, others);
-    if (next) {
+    stopDedupe = dedupeNames(awareness, () => identity, (next) => {
       identity = next;
       session.identity = next;
       saveIdentity(room, next, storage);
       publish();
-    }
+    });
   };
   provider.on("sync", onSync);
 
@@ -309,6 +374,7 @@ export function createSession(opts: SessionOptions): Session {
     },
     destroy() {
       meta.unobserve(onMeta);
+      stopDedupe();
       stopPeople();
       peopleCbs.clear();
       statusCbs.clear();

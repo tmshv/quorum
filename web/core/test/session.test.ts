@@ -6,7 +6,7 @@ import {
 } from "y-protocols/awareness";
 import {
   type Person, ensureDefaultLang, forgetRemotePeers, localAwarenessMessage, normalizeUser,
-  resolveClash, sendLocalAwarenessOnly, watchPeople,
+  dedupeNames, resolveClash, sendLocalAwarenessOnly, watchPeople,
 } from "../src/session";
 import { PALETTE } from "../src/names";
 import type { Identity } from "../src/identity";
@@ -31,39 +31,73 @@ describe("ensureDefaultLang", () => {
 
 describe("resolveClash", () => {
   const me: Identity = { name: "Deadlock", color: PALETTE[0]!, edited: false };
-  it("re-picks the name on clash when not edited", () => {
-    const others = [{ name: "Deadlock", color: PALETTE[1]! }];
-    const r = resolveClash(me, others, () => 0)!;
+  const at = { clientId: 5, since: 1000 };
+  const rival = (name: string, color: string, since: number, clientId = 9) => ({ clientId, since, name, color });
+
+  it("the later joiner re-picks a clashing name", () => {
+    const r = resolveClash(me, at, [rival("Deadlock", PALETTE[1]!, 500)], () => 0)!;
     expect(r.name).not.toBe("Deadlock");
     expect(r.color).toBe(me.color);
   });
-  it("keeps an edited name", () => {
-    const r = resolveClash({ ...me, edited: true }, [{ name: "Deadlock", color: PALETTE[1]! }]);
-    expect(r).toBeNull();
+  it("the earlier joiner keeps its name", () => {
+    expect(resolveClash(me, at, [rival("Deadlock", PALETTE[1]!, 2000)])).toBeNull();
   });
-  it("re-picks a clashing colour even when edited", () => {
-    const others = [{ name: "x", color: me.color }];
-    const r = resolveClash({ ...me, edited: true }, others, () => 0)!;
+  it("simultaneous joiners: the higher client id gives way, the lower keeps", () => {
+    const twin = [rival("Deadlock", PALETTE[1]!, 1000, 3)];
+    expect(resolveClash(me, at, twin, () => 0)!.name).not.toBe("Deadlock");
+    expect(resolveClash(me, { clientId: 1, since: 1000 }, twin)).toBeNull();
+  });
+  it("keeps an edited name", () => {
+    expect(resolveClash({ ...me, edited: true }, at, [rival("Deadlock", PALETTE[1]!, 500)])).toBeNull();
+  });
+  it("re-picks a clashing colour even when edited, avoiding everyone's", () => {
+    const others = [rival("x", me.color, 500), rival("y", PALETTE[1]!, 3000)];
+    const r = resolveClash({ ...me, edited: true }, at, others, () => 0)!;
     expect(r.name).toBe("Deadlock");
-    expect(r.color).not.toBe(me.color);
-    expect(others.map((o) => o.color)).not.toContain(r.color);
+    expect([me.color, PALETTE[1]]).not.toContain(r.color);
+  });
+  it("keeps a clashing colour when no colour is free", () => {
+    const others = PALETTE.map((c, i) => rival(`n${i}`, c, 500, 10 + i));
+    expect(resolveClash(me, at, others)).toBeNull();
+  });
+  it("re-picked names avoid everyone in the room", () => {
+    const others = [rival("Deadlock", PALETTE[1]!, 500), rival("Not Found", PALETTE[2]!, 3000)];
+    const r = resolveClash(me, at, others, () => 0)!;
+    expect(["Deadlock", "Not Found"]).not.toContain(r.name);
   });
   it("returns null without any clash", () => {
-    expect(resolveClash(me, [{ name: "a", color: PALETTE[2]! }])).toBeNull();
+    expect(resolveClash(me, at, [rival("a", PALETTE[2]!, 500)])).toBeNull();
   });
-  it("re-picked values are not used by others", () => {
-    const others = [{ name: "Deadlock", color: me.color }];
-    const r = resolveClash(me, others, () => 0)!;
-    expect(r.name).not.toBe("Deadlock");
-    expect(r.color).not.toBe(me.color);
+});
+
+describe("duplicate names after a simultaneous join", () => {
+  it("two sessions that both missed each other end up with different names", () => {
+    const a = awarenessOf(1);
+    const b = awarenessOf(2);
+    const user = { name: "Round Robin", color: PALETTE[0]!, colorLight: PALETTE[0]! + "33", since: 1000 };
+    a.setLocalStateField("user", user);
+    b.setLocalStateField("user", user);
+    const ida: Identity = { name: "Round Robin", color: PALETTE[0]!, edited: false };
+    const idb: Identity = { ...ida };
+    cleanups.push(dedupeNames(a, () => ida, (n) => { Object.assign(ida, n); a.setLocalStateField("user", { ...user, ...n }); }));
+    cleanups.push(dedupeNames(b, () => idb, (n) => { Object.assign(idb, n); b.setLocalStateField("user", { ...user, ...n }); }));
+    receive(a, b, [2]);
+    receive(b, a, [1]);
+    receive(a, b, [2]);
+    expect(ida.name).toBe("Round Robin");
+    expect(idb.name).not.toBe("Round Robin");
+    expect(ida.color).toBe(PALETTE[0]);
+    expect(idb.color).not.toBe(PALETTE[0]);
   });
 });
 
 describe("normalizeUser", () => {
   it("keeps a valid user and derives colorLight", () => {
-    expect(normalizeUser({ name: "Bob", color: "#AABBCC" })).toEqual({
-      name: "Bob", color: "#AABBCC", colorLight: "#AABBCC33",
+    expect(normalizeUser({ name: "Bob", color: "#AABBCC", since: 42 })).toEqual({
+      name: "Bob", color: "#AABBCC", colorLight: "#AABBCC33", since: 42,
     });
+    expect(normalizeUser({ name: "Bob", since: "soon" }).since).toBe(Number.MAX_SAFE_INTEGER);
+    expect(normalizeUser({ name: "Bob", since: Infinity }).since).toBe(Number.MAX_SAFE_INTEGER);
   });
   it("rejects CSS injection in colour", () => {
     const u = normalizeUser({ name: "x", color: "red;background:url(http://evil)", colorLight: "url(x)" }, 2);
