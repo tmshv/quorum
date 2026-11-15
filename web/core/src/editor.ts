@@ -72,10 +72,41 @@ export function sizeGuard(max: number, onTooLarge: () => void): Extension {
   });
 }
 
+const MONO = '"JetBrains Mono", ui-monospace, monospace';
+
 const fontTheme = EditorView.theme({
   "&": { height: "100%" },
-  ".cm-scroller": { fontFamily: '"JetBrains Mono", ui-monospace, monospace' },
-  ".cm-content, .cm-gutters": { fontFamily: '"JetBrains Mono", ui-monospace, monospace' },
+  ".cm-scroller": { fontFamily: MONO },
+  ".cm-content, .cm-gutters": { fontFamily: MONO },
+});
+
+/**
+ * Remote carets as always-visible name flags, with no hover effects.
+ * y-codemirror's line selection swaps the line's 6px left padding for a 4px
+ * margin, which nudged fully selected lines 2px left in everyone else's view;
+ * keep CodeMirror's own `.cm-line` padding instead. The content gets top room
+ * so a flag on the first line is not clipped.
+ */
+export const remoteCursorTheme = EditorView.theme({
+  ".cm-content": { paddingTop: "20px" },
+  ".cm-yLineSelection": { margin: "0", padding: "0 2px 0 6px" },
+  ".cm-ySelectionCaret": { borderLeftWidth: "2px", borderRightWidth: "0", marginLeft: "-1px", marginRight: "-1px" },
+  ".cm-ySelectionCaretDot": { display: "none" },
+  ".cm-ySelectionInfo, .cm-ySelectionCaret:hover > .cm-ySelectionInfo": {
+    top: "auto",
+    bottom: "100%",
+    left: "-2px",
+    padding: "1px 6px",
+    borderRadius: "4px 4px 4px 0",
+    color: "#15131f",
+    fontFamily: MONO,
+    fontSize: "12px",
+    fontWeight: "700",
+    lineHeight: "16px",
+    opacity: "1",
+    transition: "none",
+    pointerEvents: "none",
+  },
 });
 
 export function createEditor(
@@ -96,6 +127,7 @@ export function createEditor(
       yCollab(session.text, session.awareness, { undoManager }),
       Prec.highest(keymap.of(yUndoManagerKeymap)),
       fontTheme,
+      remoteCursorTheme,
       theme.of(themeById(opts.theme).extension),
       language.of([]),
     ],
