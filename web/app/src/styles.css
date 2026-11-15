@@ -67,11 +67,11 @@ button { cursor: pointer; }
   border: 1px solid var(--line);
   border-radius: 6px;
   background: transparent;
-  color: var(--muted);
+  color: var(--fg);
 }
-.icon-btn:hover { color: var(--fg); border-color: var(--accent); }
+.icon-btn:hover { border-color: var(--accent); }
 .icon-btn.small { width: 30px; height: 30px; background: var(--field); }
-.lang-select { padding: 8px 6px; }
+.lang-select select { padding-block: 8px; }
 .go {
   padding: 9px 16px;
   border: 1px solid var(--fg);
@@ -111,7 +111,11 @@ select, .btn, .rename {
   border-radius: 6px;
   background: var(--field);
 }
-select { color-scheme: inherit; }
+select { color-scheme: inherit; appearance: none; padding-right: 28px; cursor: pointer; }
+.select { position: relative; display: inline-flex; align-items: center; }
+.select select { width: 100%; }
+.select-chevron { position: absolute; right: 9px; color: var(--muted); pointer-events: none; }
+.select:hover select { border-color: var(--accent); }
 .btn:hover { border-color: var(--accent); }
 .btn.small { padding: 1px 8px; }
 .stage { position: relative; min-height: 0; }
@@ -125,7 +129,7 @@ select { color-scheme: inherit; }
   right: 18px;
   z-index: 10;
   width: max-content;
-  max-width: min(20rem, calc(100% - 28px));
+  max-width: min(24rem, calc(100% - 28px));
   border: 1px solid var(--line);
   border-radius: 10px;
   background: color-mix(in srgb, var(--bg) 92%, transparent);
@@ -144,6 +148,7 @@ select { color-scheme: inherit; }
   color: var(--fg);
 }
 .people-toggle:hover { color: var(--accent); }
+.people-toggle:focus-visible, .menu-item:focus-visible { outline-offset: -2px; }
 .people-count { font-weight: 700; }
 .people-stack { display: inline-flex; margin-left: auto; }
 .people-stack .dot + .dot { margin-left: -3px; }

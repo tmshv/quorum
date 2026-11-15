@@ -13,7 +13,7 @@ import {
   themeById,
 } from "@quorum/core";
 import { applyChrome } from "./chrome";
-import { Link, icon } from "./icons";
+import { Link, icon, selectBox } from "./icons";
 import { createMenu } from "./menu";
 import { mountPeople } from "./people";
 import { trackPresence } from "./presence";
@@ -139,7 +139,7 @@ export function mountRoom(root: HTMLElement, room: string): void {
 
   const controls = document.createElement("div");
   controls.className = "controls";
-  controls.append(labelled("lang", langSelect), labelled("theme", themeSelect), menu, pill);
+  controls.append(labelled("lang", selectBox(langSelect)), labelled("theme", selectBox(themeSelect)), menu, pill);
 
   bar.append(title, copyLink, controls);
 

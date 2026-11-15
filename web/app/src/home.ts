@@ -1,5 +1,5 @@
 import { DEFAULT_LANGUAGE, LANGUAGES, type LanguageId, languageById, normalizeRoom, randomRoom } from "@quorum/core";
-import { RefreshCw, icon } from "./icons";
+import { RefreshCw, icon, selectBox } from "./icons";
 
 const LANG_KEY = "quorum:lang";
 
@@ -67,7 +67,6 @@ export function mountHome(root: HTMLElement): void {
   });
 
   const lang = document.createElement("select");
-  lang.className = "lang-select";
   lang.setAttribute("aria-label", "Language");
   lang.title = "Starting language (anyone in the room can change it)";
   for (const l of LANGUAGES) lang.append(new Option(l.label, l.id));
@@ -78,7 +77,7 @@ export function mountHome(root: HTMLElement): void {
   go.className = "go";
   go.textContent = "Open room";
 
-  form.append(host, input, reroll, lang, go);
+  form.append(host, input, reroll, selectBox(lang, "lang-select"), go);
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     const room = normalizeRoom(input.value) || normalizeRoom(randomRoom());

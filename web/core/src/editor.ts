@@ -1,5 +1,5 @@
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
-import { defaultKeymap } from "@codemirror/commands";
+import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import { defaultKeymap, indentWithTab } from "@codemirror/commands";
 import {
   bracketMatching, defaultHighlightStyle, foldGutter, foldKeymap, indentOnInput, syntaxHighlighting,
 } from "@codemirror/language";
@@ -26,6 +26,8 @@ export interface EditorHandle {
 /**
  * `basicSetup` without `history()`/`historyKeymap`: CodeMirror's history would
  * record (and undo) other people's edits. Undo goes through the Y.UndoManager.
+ * No autocompletion (it is an interview). Tab indents; Escape then Tab leaves
+ * the editor, as CodeMirror documents for `indentWithTab`.
  */
 export const collabSetup = [
   lineNumbers(),
@@ -39,7 +41,6 @@ export const collabSetup = [
   syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
   bracketMatching(),
   closeBrackets(),
-  autocompletion(),
   rectangularSelection(),
   crosshairCursor(),
   highlightActiveLine(),
@@ -49,8 +50,8 @@ export const collabSetup = [
     ...defaultKeymap,
     ...searchKeymap,
     ...foldKeymap,
-    ...completionKeymap,
     ...lintKeymap,
+    indentWithTab,
   ]),
 ];
 
@@ -76,6 +77,7 @@ const MONO = '"JetBrains Mono", ui-monospace, monospace';
 
 const fontTheme = EditorView.theme({
   "&": { height: "100%" },
+  "&.cm-focused": { outline: "none" },
   ".cm-scroller": { fontFamily: MONO },
   ".cm-content, .cm-gutters": { fontFamily: MONO },
 });
@@ -84,11 +86,10 @@ const fontTheme = EditorView.theme({
  * Remote carets as always-visible name flags, with no hover effects.
  * y-codemirror's line selection swaps the line's 6px left padding for a 4px
  * margin, which nudged fully selected lines 2px left in everyone else's view;
- * keep CodeMirror's own `.cm-line` padding instead. The content gets top room
- * so a flag on the first line is not clipped.
+ * keep CodeMirror's own `.cm-line` padding instead. On the first line the
+ * flag hangs below the caret, where the editor's top edge cannot clip it.
  */
 export const remoteCursorTheme = EditorView.theme({
-  ".cm-content": { paddingTop: "20px" },
   ".cm-yLineSelection": { margin: "0", padding: "0 2px 0 6px" },
   ".cm-ySelectionCaret": { borderLeftWidth: "2px", borderRightWidth: "0", marginLeft: "-1px", marginRight: "-1px" },
   ".cm-ySelectionCaretDot": { display: "none" },
@@ -106,6 +107,11 @@ export const remoteCursorTheme = EditorView.theme({
     opacity: "1",
     transition: "none",
     pointerEvents: "none",
+  },
+  ".cm-line:first-child .cm-ySelectionInfo, .cm-line:first-child .cm-ySelectionCaret:hover > .cm-ySelectionInfo": {
+    top: "100%",
+    bottom: "auto",
+    borderRadius: "0 4px 4px 4px",
   },
 });
 
