@@ -10,7 +10,7 @@
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.8",
     "@quorum/core": "*",
-    "lucide": "1.72.0"
+    "lucide": "1.75.0"
   },
   "devDependencies": {
     "vite": "^8.0.0"
